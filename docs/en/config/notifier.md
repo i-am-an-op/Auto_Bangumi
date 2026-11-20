@@ -61,3 +61,5 @@ Each object in `providers` usually contains:
 | `template` | Custom message template |
 
 On the first start after an upgrade to 4.0, the old Bark key `token` moves to `device_key`, and the old WeCom key `chat_id` moves to `webhook_url`.
+
+For Telegram, the optional `telegram` object controls topic delivery, posters, formatting, silent sends and additional text or photo options. [Telegram settings and configuration example](../dev/telegram-notifications.md)
