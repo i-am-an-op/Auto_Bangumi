@@ -1,11 +1,13 @@
 """Tests for Config API endpoints and config sanitization."""
 
+import asyncio
 import json
+from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx2
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from module.api import v1
@@ -829,6 +831,14 @@ class TestRestoreMasked:
         assert (
             authed_client.patch("/api/v1/config/update", json=data).status_code == 400
         )
+        # An explicit token on an unidentified row could be a rotation. It
+        # cannot establish the original identity of the other (masked) row.
+        data["notification"]["providers"].append(
+            {"type": "telegram", "chat_id": "-100", "token": "101:testA"}
+        )
+        assert (
+            authed_client.patch("/api/v1/config/update", json=data).status_code == 400
+        )
         # Once only B exists, a legacy client can still edit it with a masked token.
         data["notification"]["providers"] = [kept]
         assert (
@@ -871,6 +881,62 @@ class TestRestoreMasked:
             saved["token"],
             saved["telegram"]["message_thread_id"],
         ) == (new_id, "103:new", 11)
+
+    async def test_concurrent_masked_save_keeps_a_rotated_bot_token(
+        self, app, mock_ctx, two_telegram_bots
+    ):
+        first_written, second_arrived = asyncio.Event(), asyncio.Event()
+        reload_from_disk = mock_ctx.reload_settings.side_effect
+
+        async def reload():
+            if not first_written.is_set():
+                first_written.set()
+                await second_arrived.wait()
+            reload_from_disk()
+
+        async def principal(request: Request):
+            if request.headers.get("x-test-edit") == "topic":
+                second_arrived.set()
+            return "testuser"
+
+        async def context():
+            return mock_ctx
+
+        mock_ctx.reload_settings.side_effect = reload
+        app.dependency_overrides[get_current_user] = principal
+        app.dependency_overrides[get_context] = context
+        async with (
+            asyncio.timeout(5),
+            httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=app), base_url="http://ab.test"
+            ) as client,
+        ):
+            change_topic = (await client.get("/api/v1/config/get")).json()
+            rotate = deepcopy(change_topic)
+            rotate["notification"]["providers"][0]["token"] = "101:rotated"
+            change_topic["notification"]["providers"][0]["telegram"][
+                "message_thread_id"
+            ] = 99
+            async with asyncio.TaskGroup() as group:
+                first = group.create_task(
+                    client.patch("/api/v1/config/update", json=rotate)
+                )
+                await first_written.wait()
+                second = group.create_task(
+                    client.patch(
+                        "/api/v1/config/update",
+                        json=change_topic,
+                        headers={"x-test-edit": "topic"},
+                    )
+                )
+        assert first.result().status_code == second.result().status_code == 200
+        saved = json.loads(two_telegram_bots.read_text())["notification"]["providers"][
+            0
+        ]
+        assert (saved["token"], saved["telegram"]["message_thread_id"]) == (
+            "101:rotated",
+            99,
+        )
 
     def test_saved_and_edited_telegram_tests_use_real_delivery(
         self, authed_client, monkeypatch

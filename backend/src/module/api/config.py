@@ -1,8 +1,8 @@
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -238,36 +238,41 @@ def _restore_providers(
     available = {
         row["row_id"]: row for row in current if _is_telegram(row) and "row_id" in row
     }
-    without_id = []
+    legacy_masked = []
+    new_rows = []
     for provider, row in zip(providers, rows, strict=True):
         if isinstance(provider, TelegramProviderConfig):
             if "row_id" in provider.model_fields_set:
                 restore_telegram_secrets(row, available.pop(provider.row_id, None))
+            elif _contains_mask(row, _is_provider_secret):
+                legacy_masked.append(row)
             else:
-                without_id.append(row)
+                new_rows.append(row)
 
-    # A newly added WebUI row still holds its explicit token until the next GET.
-    # Reuse its ID on subsequent saves when the token identifies a single row.
-    # Reserve those matches before restoring masks from older clients.
-    for row in sorted(
-        without_id, key=lambda item: _contains_mask(item, _is_provider_secret)
-    ):
-        candidates = list(available.values())
-        if row.get("token") != _MASK:
+    # Only explicit IDs can rule another row out as the source of a mask.
+    # A plaintext token on an ID-less row could be a replacement credential.
+    if legacy_masked:
+        if len(legacy_masked) != 1 or len(available) != 1:
+            raise MaskRestoreError(
+                "Cannot identify the masked Telegram row. Reload the settings."
+            )
+        row = legacy_masked[0]
+        row["row_id"], saved = available.popitem()
+        restore_telegram_secrets(row, saved)
+
+    # The WebUI keeps an added row's explicit token until its next GET. Reuse
+    # the saved ID on a retry where the token (or complete row) is unique.
+    for row in new_rows:
+        candidates = [
+            old for old in available.values() if old.get("token") == row.get("token")
+        ]
+        if len(candidates) > 1:
             candidates = [
-                old for old in candidates if old.get("token") == row.get("token")
+                old for old in candidates if (old | {"row_id": row["row_id"]}) == row
             ]
-            if len(candidates) > 1:
-                candidates = [
-                    old
-                    for old in candidates
-                    if (old | {"row_id": row["row_id"]}) == row
-                ]
-        saved = None
         if len(candidates) == 1:
             row["row_id"] = candidates[0]["row_id"]
-            saved = available.pop(row["row_id"])
-        restore_telegram_secrets(row, saved)
+            del available[row["row_id"]]
     return rows
 
 
@@ -284,7 +289,21 @@ async def get_config(ctx: AppContext = Depends(get_context)):
     return _sanitize_dict(config)
 
 
-@router.patch("/update", response_model=APIResponse)
+async def _serialize_config_updates(request: Request) -> AsyncIterator[None]:
+    # Restore masks against the last completed save, including any token rotation.
+    # The lock belongs to this app and covers both the file write and live reload.
+    state = request.app.state
+    if not hasattr(state, "config_update_lock"):
+        state.config_update_lock = asyncio.Lock()
+    async with state.config_update_lock:
+        yield
+
+
+@router.patch(
+    "/update",
+    response_model=APIResponse,
+    dependencies=[Depends(_serialize_config_updates, scope="function")],
+)
 async def update_config(config: Config, ctx: AppContext = Depends(get_context)):
     """Persist and reload configuration from the supplied payload."""
     try:

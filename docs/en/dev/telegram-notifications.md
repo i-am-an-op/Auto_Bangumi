@@ -46,12 +46,14 @@ Use the existing authenticated settings and notification routes. A successful te
 
 | Operation | Request |
 | --- | --- |
-| Load or save | `GET /api/v1/config/get`, then `PATCH /api/v1/config/update` with the full edited configuration. The provider lives in `notification.providers[]`. Keep the returned `********` sentinel for an untouched token. |
+| Load or save | `GET /api/v1/config/get`, then `PATCH /api/v1/config/update` with the full edited configuration. Keep the returned top-level `row_id` with its Telegram provider and the `********` sentinel for an untouched token. Omit `row_id` on new rows. |
 | Test a saved row | `POST /api/v1/notification/test` with `{"provider_index": 0}`. Count every saved row, including disabled providers. |
 | Test a new draft | `POST /api/v1/notification/test-config` with the provider object and its token. This sends the test without saving the draft. |
 | Test edits to a saved row | `POST /api/v1/notification/test-config?saved_provider_index=0` with the edited provider object. The server resolves masked credentials using the original saved row. Keep that index when the draft list is reordered. |
 
 The test response contains `success`, `message`, `message_en` and `message_zh`. Inspect `success` even on HTTP 200. Invalid settings or a mismatched saved reference produce HTTP 422. A Telegram rejection can include a reason such as an invalid topic. A transport timeout reports unconfirmed delivery and stops further sends for that notification.
+
+The backend assigns existing Telegram rows an ID on upgrade and persists it across restarts. Two bots can exchange topics or move in the list while their credentials stay with their original rows. A masked save that refers to a deleted row, or an older payload that omits the ID and has several possible source rows, returns HTTP 400. Reload the current configuration before retrying. Duplicate Telegram row IDs produce HTTP 422.
 
 ## UI integration checks
 
