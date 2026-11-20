@@ -23,6 +23,32 @@ declare module 'axios' {
   }
 }
 
+const RAW_NUMBER_RESPONSE_PATHS = ['api/v1/config/get'] as const;
+const RAW_NUMBER_REQUEST_PATHS = [
+  'api/v1/config/update',
+  'api/v1/notification/test-config',
+] as const;
+
+function matchesApiPath(
+  url: string | undefined,
+  allowedPaths: readonly string[]
+): boolean {
+  if (!url) return false;
+  const withoutQuery = url.split(/[?#]/, 1)[0];
+  let path = withoutQuery;
+  if (/^https?:\/\//i.test(withoutQuery)) {
+    try {
+      path = new URL(withoutQuery).pathname;
+    } catch {
+      path = withoutQuery;
+    }
+  }
+  const normalized = path.replace(/^\/+/, '');
+  return allowedPaths.some(
+    (allowed) => normalized === allowed || normalized.endsWith(`/${allowed}`)
+  );
+}
+
 const rawDefaultRequestTransformers = Axios.defaults?.transformRequest;
 const defaultRequestTransformers: AxiosRequestTransformer[] = Array.isArray(
   rawDefaultRequestTransformers
@@ -49,7 +75,11 @@ const preserveRawNumbersRequest: AxiosRequestTransformer = function (
   const isNonJsonContentType =
     contentType.includes('application/x-www-form-urlencoded') ||
     contentType.includes('multipart/form-data');
-  if (!isNonJsonContentType && hasRawJsonNumberToken(data)) {
+  if (
+    matchesApiPath(this.url, RAW_NUMBER_REQUEST_PATHS) &&
+    !isNonJsonContentType &&
+    hasRawJsonNumberToken(data)
+  ) {
     headers?.setContentType?.('application/json', false);
     return stringifyJsonPreservingNumbers(data);
   }
@@ -65,6 +95,7 @@ const preserveRawNumbersResponse: AxiosResponseTransformer = function (
   status
 ) {
   if (
+    matchesApiPath(this.url, RAW_NUMBER_RESPONSE_PATHS) &&
     typeof data === 'string' &&
     data.length > 0 &&
     (!this.responseType || this.responseType === 'json')
@@ -72,7 +103,7 @@ const preserveRawNumbersResponse: AxiosResponseTransformer = function (
     try {
       return parseJsonPreservingNumbers(data);
     } catch {
-      // 非 JSON 文本响应（如 /api/v1/log）回退给 Axios 默认转换器原样返回
+      // 非 JSON 响应回退给 Axios 默认转换器原样返回
     }
   }
   return defaultResponseTransformers.reduce(

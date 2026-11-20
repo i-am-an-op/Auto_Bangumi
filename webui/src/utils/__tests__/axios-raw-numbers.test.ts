@@ -94,4 +94,49 @@ describe('axios raw JSON number preservation (real axios instance)', () => {
     });
     expect(logText).toBe('2026-11-20 INFO id=9007199254740993\n');
   });
+
+  it('should not wrap large numeric IDs on non-config routes such as inbox messages and markRead', async () => {
+    const { axios } = await import('@/utils/axios');
+    const { apiNotification } = await import('@/api/notification');
+
+    const seenMarkReadUrls: string[] = [];
+    const originalAdapter = axios.defaults.adapter;
+    axios.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      if (config.url === 'api/v1/notification/messages') {
+        return {
+          data: '{"messages":[{"id":9007199254740992,"kind":"rss_failed","severity":"warning","title":"RSS","body":"Offline","payload":null,"read":false,"count":1,"created_at":"2026-11-20T00:00:00Z","updated_at":"2026-11-20T00:00:00Z"}],"total":1,"unread_count":1}',
+          status: 200,
+          statusText: 'OK',
+          headers: { 'content-type': 'application/json' },
+          config,
+        };
+      }
+      if (config.url?.startsWith('api/v1/notification/messages/')) {
+        seenMarkReadUrls.push(config.url);
+        return {
+          data: '{"status":true,"status_code":200,"msg_en":"Message marked as read.","msg_zh":"消息已标记为已读。"}',
+          status: 200,
+          statusText: 'OK',
+          headers: { 'content-type': 'application/json' },
+          config,
+        };
+      }
+      throw new Error(`Unexpected URL: ${config.url}`);
+    };
+
+    try {
+      const inbox = await apiNotification.getMessages();
+      expect(inbox.messages).toHaveLength(1);
+      const messageId = inbox.messages[0].id;
+      expect(typeof messageId).toBe('number');
+      expect(messageId).toBe(9007199254740992);
+
+      await apiNotification.markRead(messageId);
+      expect(seenMarkReadUrls).toEqual([
+        'api/v1/notification/messages/9007199254740992/read',
+      ]);
+    } finally {
+      axios.defaults.adapter = originalAdapter;
+    }
+  });
 });
