@@ -1,7 +1,10 @@
 """Tests for notification: provider registry, manager, and provider implementations."""
 
+import json
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx2
 import pytest
 
 from module.models import Notification
@@ -202,110 +205,164 @@ class TestNotificationManager:
 class TestTelegramProvider:
     @pytest.fixture
     def provider(self):
-        config = ProviderConfig(
-            type="telegram", enabled=True, token="test_token", chat_id="12345"
+        return TelegramProvider(
+            ProviderConfig(type="telegram", token="123:private", chat_id="-100123")
         )
-        return TelegramProvider(config)
 
-    async def test_send_with_photo(self, provider):
-        """Sends photo when poster available."""
-        notify = Notification(
+    @pytest.fixture
+    async def telegram(self, monkeypatch):
+        requests, replies = [], []
+
+        def handle(request):
+            requests.append(request)
+            if replies:
+                reply = replies.pop(0)
+                if isinstance(reply, Exception):
+                    raise reply
+                return reply
+            return httpx2.Response(200, json={"ok": True, "result": {"message_id": 7}})
+
+        async with httpx2.AsyncClient(
+            transport=httpx2.MockTransport(handle), follow_redirects=True
+        ) as client:
+            monkeypatch.setattr(
+                "module.notification.providers.telegram.get_shared_client",
+                AsyncMock(return_value=client),
+            )
+            yield requests, replies
+
+    @pytest.fixture
+    def poster(self, monkeypatch):
+        source, cached = AsyncMock(return_value=None), AsyncMock(return_value=None)
+        monkeypatch.setattr(
+            "module.notification.providers.telegram.load_poster_url", source
+        )
+        monkeypatch.setattr("module.notification.providers.telegram.load_image", cached)
+        return source, cached
+
+    @pytest.fixture
+    def episode(self):
+        return Notification(
             official_title="Test Anime",
             season=1,
             episode=5,
-            poster_path="/path/to/poster.jpg",
+            poster_path="posters/cover.jpg",
         )
 
-        with patch.object(provider, "post_files", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = MagicMock(status_code=200)
-            with patch(
-                "module.notification.providers.telegram.load_image"
-            ) as mock_load:
-                mock_load.return_value = b"image_data"
-                result = await provider.send(notify)
+    async def test_send_without_photo(self, provider, telegram, poster, episode):
+        assert await provider.send(episode)
+        (request,) = telegram[0]
+        assert request.url.path.endswith("/sendMessage")
+        assert json.loads(request.content) == {
+            "chat_id": "-100123",
+            "text": "番剧名称：Test Anime\n季度： 第1季\n更新集数： 第5集",
+            "disable_notification": True,
+        }
 
-        assert result is True
-        mock_post.assert_called_once()
+    async def test_send_prefers_poster_source_url(
+        self, provider, telegram, poster, episode
+    ):
+        source, cached = poster
+        source.return_value = "https://example.test/cover.jpg"
+        assert await provider.send(episode)
+        (request,) = telegram[0]
+        assert request.url.path.endswith("/sendPhoto")
+        payload = json.loads(request.content)
+        assert payload["photo"] == source.return_value
+        assert "Test Anime" in payload["caption"] and "text" not in payload
+        cached.assert_not_awaited()
 
-    async def test_send_without_photo(self, provider):
-        """Sends text when no poster available."""
-        notify = Notification(official_title="Test Anime", season=1, episode=5)
-
-        with patch.object(provider, "post_data", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = MagicMock(status_code=200)
-            with patch(
-                "module.notification.providers.telegram.load_image"
-            ) as mock_load:
-                mock_load.return_value = None
-                result = await provider.send(notify)
-
-        assert result is True
-        mock_post.assert_called_once()
-
-    async def test_send_prefers_poster_source_url(self, provider):
-        """有源 URL 时默认让 Telegram 服务端按 URL 拉图，不做本地上传（#1094）。"""
-        notify = Notification(
-            official_title="Test Anime",
-            season=1,
-            episode=5,
-            poster_path="posters/abc123.jpg",
+    async def test_send_cached_photo(self, provider, telegram, poster, episode):
+        poster[1].return_value = b"image-bytes"
+        assert await provider.send(episode)
+        (request,) = telegram[0]
+        assert request.url.path.endswith("/sendPhoto") and request.headers[
+            "content-type"
+        ].startswith("multipart/form-data;")
+        assert (
+            b'name="photo"; filename="cover.jpg"' in request.content
+            and b"image-bytes" in request.content
         )
 
-        with patch.object(provider, "post_data", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = MagicMock(status_code=200)
-            with patch(
-                "module.notification.providers.telegram.load_poster_url",
-                new_callable=AsyncMock,
-            ) as mock_url:
-                mock_url.return_value = "https://mikanani.me/img/a.jpg"
-                with patch(
-                    "module.notification.providers.telegram.load_image",
-                    new_callable=AsyncMock,
-                ) as mock_load:
-                    result = await provider.send(notify)
-
-        assert result is True
-        mock_post.assert_called_once()
-        assert mock_post.call_args[0][0] == provider.photo_url
-        assert mock_post.call_args[0][1]["photo"] == "https://mikanani.me/img/a.jpg"
-        mock_load.assert_not_called()
-
-    async def test_send_falls_back_to_text_when_photo_send_fails(self, provider):
-        """sendPhoto 失败（返回 None）不再崩溃，降级发纯文本消息（#1094）。"""
-        notify = Notification(
-            official_title="Test Anime",
-            season=1,
-            episode=5,
-            poster_path="posters/abc123.jpg",
+    async def test_rejected_posters_fall_back_to_text(
+        self, provider, telegram, poster, episode
+    ):
+        requests, replies = telegram
+        poster[0].return_value = "https://example.test/rejected.jpg"
+        poster[1].return_value = b"image"
+        replies.extend(
+            httpx2.Response(
+                400, json={"ok": False, "error_code": 400, "description": "Bad photo"}
+            )
+            for _ in range(2)
         )
+        assert await provider.send(episode)
+        assert [r.url.path.rsplit("/", 1)[1] for r in requests] == [
+            "sendPhoto",
+            "sendPhoto",
+            "sendMessage",
+        ]
 
-        with patch.object(provider, "post_data", new_callable=AsyncMock) as mock_post:
-            mock_post.side_effect = [None, MagicMock(status_code=200)]
-            with patch(
-                "module.notification.providers.telegram.load_poster_url",
-                new_callable=AsyncMock,
-            ) as mock_url:
-                mock_url.return_value = "https://mikanani.me/img/a.jpg"
-                with patch(
-                    "module.notification.providers.telegram.load_image",
-                    new_callable=AsyncMock,
-                ) as mock_load:
-                    mock_load.return_value = None
-                    result = await provider.send(notify)
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            httpx2.ReadTimeout("123:private"),
+            httpx2.Response(307, headers={"Location": "https://another.test"}),
+            httpx2.Response(
+                200,
+                json={"ok": False, "error_code": 429, "description": "rate limited"},
+            ),
+            httpx2.Response(502, content=b"internal details"),
+        ],
+    )
+    async def test_failed_photo_is_not_replayed(
+        self, provider, telegram, poster, episode, failure, caplog
+    ):
+        caplog.set_level(logging.INFO, logger="httpx2")
+        requests, replies = telegram
+        replies.append(failure)
+        poster[0].return_value = "https://example.test/cover.jpg"
+        assert not await provider.send(episode)
+        assert len(requests) == 1 and "123:private" not in caplog.text
+        poster[1].assert_not_awaited()
 
-        assert result is True
-        assert mock_post.call_count == 2
-        assert mock_post.call_args_list[0][0][0] == provider.photo_url
-        assert mock_post.call_args_list[1][0][0] == provider.message_url
+    async def test_test_sends_real_message(self, provider, telegram):
+        ok, message = await provider.test()
+        assert ok and "successfully" in message
+        (request,) = telegram[0]
+        assert request.url.path.endswith("/sendMessage")
+        payload = json.loads(request.content)
+        assert payload["chat_id"] == "-100123" and "test successful!" in payload["text"]
+        assert "disable_notification" not in payload
 
-    async def test_test_success(self, provider):
-        """Test method sends test message."""
-        with patch.object(provider, "post_data", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = MagicMock(status_code=200)
-            success, message = await provider.test()
+    async def test_test_returns_sanitized_rejection(self, provider, telegram):
+        telegram[1].append(
+            httpx2.Response(
+                403,
+                json={
+                    "ok": False,
+                    "error_code": 403,
+                    "description": "Forbidden 123:private",
+                },
+            )
+        )
+        ok, message = await provider.test()
+        assert not ok and "Forbidden" in message and "123:private" not in message
 
-        assert success is True
-        assert "successfully" in message.lower()
+    async def test_test_requires_a_destination(self, telegram):
+        provider = TelegramProvider(ProviderConfig(type="telegram", token="test"))
+        ok, message = await provider.test()
+        assert not ok and "chat ID" in message
+        assert not telegram[0]
+
+    async def test_system_event_sends_title_and_body(self, provider, telegram):
+        assert await provider._deliver_text("标题", "正文")
+        (request,) = telegram[0]
+        assert json.loads(request.content) == {
+            "chat_id": "-100123",
+            "text": "标题\n正文",
+            "disable_notification": True,
+        }
 
 
 class TestDiscordProvider:
@@ -757,20 +814,6 @@ class TestDeliverText:
         provider = ServerChanProvider(config)
 
         assert provider.notification_url == "https://sctapi.ftqq.com/sctpXYZ.send"
-
-    async def test_telegram_deliver_text_posts_combined_text(self):
-        config = ProviderConfig(
-            type="telegram", enabled=True, token="test_token", chat_id="12345"
-        )
-        provider = TelegramProvider(config)
-
-        with patch.object(provider, "post_data", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = MagicMock(status_code=200)
-            result = await provider._deliver_text("标题", "正文")
-
-        assert result is True
-        data = mock_post.call_args[0][1]
-        assert data["text"] == "标题\n正文"
 
     async def test_webhook_deliver_text_posts_title_and_message(self):
         config = ProviderConfig(
