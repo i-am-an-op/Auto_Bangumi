@@ -18,6 +18,10 @@ from module.conf.search_provider import DEFAULT_PROVIDER
 from module.models.bangumi import Notification
 from module.models.config import NotificationProvider as ProviderConfig
 from module.notification.base import NotificationProvider
+from module.notification.providers.telegram import (
+    TelegramDeliveryError,
+    TelegramProvider,
+)
 from module.plugin.host import provider as host_provider
 
 # ------------------------------------------------------------------ 下载器
@@ -92,6 +96,16 @@ class _CoreNotifier:
         self._provider: NotificationProvider = _registered(
             points.NOTIFIER, config.type
         )(config)
+        if isinstance(self._provider, TelegramProvider):
+            # Telegram's send boundary returns on acceptance and raises on rejection.
+            # Its protocol-level tests exercise that boundary with HTTPX MockTransport.
+            failure = (
+                None
+                if status_code == 200
+                else TelegramDeliveryError("Rejected", status_code)
+            )
+            self._provider._post = AsyncMock(side_effect=failure)
+            return
         response = SimpleNamespace(status_code=status_code, json=dict)
         for name in ("post_data", "post_files", "_post_json"):
             setattr(self._provider, name, AsyncMock(return_value=response))
