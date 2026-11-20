@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx2
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -632,6 +633,176 @@ class TestRestoreMasked:
             "providers"
         ]
         assert (saved["sendkey"], saved["webhook"]) == ("sk", "https://h")
+
+    def test_telegram_settings_round_trip_after_row_reorder(
+        self, authed_client, mock_settings
+    ):
+        button = {"text": "Open", "url": "https://example.test"}
+        config = Config.model_validate(
+            {
+                "notification": {
+                    "providers": [
+                        {
+                            "type": "telegram",
+                            "chat_id": "-100",
+                            "token": "first",
+                            "telegram": {"message_thread_id": 1},
+                        },
+                        {
+                            "type": "telegram",
+                            "chat_id": "-100",
+                            "token": "second",
+                            "telegram": {
+                                "message_thread_id": 2,
+                                "parse_mode": "HTML",
+                                "include_poster": False,
+                                "reply_markup": {"inline_keyboard": [[button]]},
+                                "text_parameters": {
+                                    "link_preview_options": {
+                                        "url": "https://example.test"
+                                    },
+                                    "future_options": [[{"secret_token": "secret"}]],
+                                },
+                            },
+                        },
+                        {
+                            "type": "custom-channel",
+                            "telegram": {"parse_mode": "private"},
+                        },
+                    ]
+                }
+            }
+        )
+        mock_settings.model_dump.side_effect = config.model_dump
+        with patch("module.api.config.settings", mock_settings):
+            data = authed_client.get("/api/v1/config/get").json()
+            first, second, plugin = data["notification"]["providers"]
+            assert second["token"] == plugin["telegram"]["parse_mode"] == "********"
+            opts = second["telegram"]
+            assert opts["reply_markup"]["inline_keyboard"] == [[button]]
+            assert (
+                opts["text_parameters"]["future_options"][0][0]["secret_token"]
+                == "********"
+            )
+            assert opts["parse_mode"] == "HTML" and opts["include_poster"] is False
+            new_button = {"text": "********", "url": "https://example.test"}
+            new_row = {
+                "type": "telegram",
+                "chat_id": "@new",
+                "token": "fresh",
+                "telegram": {"reply_markup": {"inline_keyboard": [[new_button]]}},
+            }
+            data["notification"]["providers"] = [second, first, plugin, new_row]
+            second["telegram"]["protect_content"] = True
+            response = authed_client.patch("/api/v1/config/update", json=data)
+            assert response.status_code == 200
+        rows = mock_settings.save.call_args.kwargs["config_dict"]["notification"][
+            "providers"
+        ]
+        assert [row["token"] for row in rows[:2]] == ["second", "first"]
+        assert rows[0]["telegram"]["protect_content"] is True
+        assert (
+            rows[0]["telegram"]["text_parameters"]["future_options"][0][0][
+                "secret_token"
+            ]
+            == "secret"
+        )
+        assert rows[2]["telegram"]["parse_mode"] == "private"
+        assert rows[3]["telegram"]["reply_markup"]["inline_keyboard"] == [[new_button]]
+
+    def test_saved_and_edited_telegram_tests_use_real_delivery(
+        self, authed_client, monkeypatch
+    ):
+        monkeypatch.setenv("AB_TEST_NOTIFY_TOKEN", "123:credential")
+        row = {
+            "type": "telegram",
+            "enabled": False,
+            "chat_id": "@episodes",
+            "token": "$AB_TEST_NOTIFY_TOKEN",
+            "telegram": {"message_thread_id": 1, "disable_notification": True},
+        }
+        config = Config.model_validate(
+            {"notification": {"providers": [{"type": "bark"}, row]}}
+        )
+        client = AsyncMock(spec=httpx2.AsyncClient)
+        client.post.return_value = httpx2.Response(
+            200, json={"ok": True, "result": {"message_id": 4}}
+        )
+        with (
+            patch("module.api.notification.settings", config),
+            patch("module.notification.manager.settings", config),
+            patch(
+                "module.notification.providers.telegram.get_shared_client",
+                AsyncMock(return_value=client),
+            ),
+        ):
+            saved = authed_client.post(
+                "/api/v1/notification/test", json={"provider_index": 1}
+            )
+            assert saved.status_code == 200 and saved.json()["success"]
+            assert client.post.await_args is not None
+            assert client.post.await_args.kwargs["json"]["message_thread_id"] == 1
+            draft = {
+                **row,
+                "token": "********",
+                "telegram": {"message_thread_id": 5, "disable_notification": False},
+            }
+            endpoint = "/api/v1/notification/test-config"
+            edited = authed_client.post(
+                endpoint, params={"saved_provider_index": 1}, json=draft
+            )
+            assert edited.status_code == 200 and edited.json()["success"]
+            assert (
+                client.post.await_args.args[0]
+                == "https://api.telegram.org/bot123:credential/sendMessage"
+            )
+            payload = client.post.await_args.kwargs["json"]
+            assert (
+                payload["message_thread_id"] == 5
+                and payload["disable_notification"] is False
+            )
+            assert not authed_client.post(endpoint, json=draft).json()["success"]
+            assert (
+                authed_client.post(
+                    endpoint, params={"saved_provider_index": 0}, json=draft
+                ).status_code
+                == 422
+            )
+            assert client.post.await_count == 2
+            assert authed_client.post(
+                endpoint, json={**draft, "token": "new:token"}
+            ).json()["success"]
+            assert client.post.await_args.args[0].endswith("/botnew:token/sendMessage")
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            {"message_thread_id": 0},
+            {"parse_mode": "wrong"},
+            {"text_parameters": {"chat_id": "other"}},
+            {"photo_parameters": {"caption": "override"}},
+            {"event": {"method": "other"}},
+        ],
+    )
+    def test_telegram_settings_and_draft_reject_invalid_options(
+        self, authed_client, options
+    ):
+        row = {
+            "type": "telegram",
+            "token": "token",
+            "chat_id": "123",
+            "telegram": options,
+        }
+        assert (
+            authed_client.patch(
+                "/api/v1/config/update", json={"notification": {"providers": [row]}}
+            ).status_code
+            == 422
+        )
+        assert (
+            authed_client.post("/api/v1/notification/test-config", json=row).status_code
+            == 422
+        )
 
     def test_update_config_preserves_password_when_masked(
         self, authed_client, mock_settings

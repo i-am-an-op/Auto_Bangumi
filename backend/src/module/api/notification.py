@@ -6,16 +6,20 @@
 
 import json
 import logging
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from module.conf import settings
 from module.database import Database, get_db
 from module.models import ResponseModel
-from module.models.config import NotificationProvider as ProviderConfig
+from module.models.config import ProviderEntry, TelegramProviderConfig
 from module.notification import NotificationManager
 from module.notification.inbox import bump_inbox_revision
 from module.security.api import get_current_user
+
+from .config import MaskRestoreError, _is_provider_secret, _restore_masked
 
 logger = logging.getLogger(__name__)
 router = APIRouter(
@@ -31,26 +35,6 @@ class TestProviderRequest(BaseModel):
     provider_index: int = Field(
         default=..., description="Index of the provider to test"
     )
-
-
-class TestProviderConfigRequest(BaseModel):
-    """Request body for testing an unsaved provider configuration."""
-
-    type: str = Field(default=..., description="Provider type")
-    enabled: bool = Field(default=True, description="Whether provider is enabled")
-    token: str | None = Field(default=None, description="Auth token")
-    chat_id: str | None = Field(default=None, description="Chat/channel ID")
-    webhook_url: str | None = Field(default=None, description="Webhook URL")
-    server_url: str | None = Field(default=None, description="Server URL")
-    device_key: str | None = Field(default=None, description="Device key")
-    user_key: str | None = Field(default=None, description="User key")
-    api_token: str | None = Field(default=None, description="API token")
-    template: str | None = Field(default=None, description="Custom template")
-    url: str | None = Field(default=None, description="URL for generic webhook")
-    sound: str | None = Field(default=None, description="Bark sound")
-    group: str | None = Field(default=None, description="Bark group")
-    level: str | None = Field(default=None, description="Bark level")
-    icon: str | None = Field(default=None, description="Bark icon URL")
 
 
 class TestResponse(BaseModel):
@@ -92,31 +76,39 @@ async def test_provider(request: TestProviderRequest):
     "/test-config",
     response_model=TestResponse,
 )
-async def test_provider_config(request: TestProviderConfigRequest):
+async def test_provider_config(
+    config: Annotated[ProviderEntry, Body()],
+    saved_provider_index: Annotated[
+        int | None,
+        Query(
+            ge=0,
+            description="Original saved Telegram row to use for masked credentials in an edited draft.",
+        ),
+    ] = None,
+):
     """Test an unsaved notification provider configuration.
 
     Useful for testing a provider before saving it to the configuration.
     """
+    if saved_provider_index is not None:
+        rows = settings.notification.providers
+        if (
+            not isinstance(config, TelegramProviderConfig)
+            or saved_provider_index >= len(rows)
+            or rows[saved_provider_index].type.lower() != "telegram"
+        ):
+            raise HTTPException(422, "The selected saved provider must be Telegram.")
+        data = config.model_dump(by_alias=True)
+        try:
+            _restore_masked(
+                data,
+                rows[saved_provider_index].model_dump(by_alias=True),
+                _is_provider_secret,
+            )
+        except MaskRestoreError as exc:
+            raise HTTPException(422, str(exc)) from None
+        config = TelegramProviderConfig.model_validate(data)
     try:
-        # Convert request to ProviderConfig
-        config = ProviderConfig(
-            type=request.type,
-            enabled=request.enabled,
-            token=request.token or "",
-            chat_id=request.chat_id or "",
-            webhook_url=request.webhook_url or "",
-            server_url=request.server_url or "",
-            device_key=request.device_key or "",
-            user_key=request.user_key or "",
-            api_token=request.api_token or "",
-            template=request.template,
-            url=request.url or "",
-            sound=request.sound,
-            group=request.group,
-            level=request.level,
-            icon=request.icon,
-        )
-
         success, message = await NotificationManager.test_provider_config(config)
         return TestResponse(
             success=success,

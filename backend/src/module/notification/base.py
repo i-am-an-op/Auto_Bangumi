@@ -1,6 +1,8 @@
 """Base class for notification providers."""
 
+import re
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from module.conf import settings
@@ -87,7 +89,9 @@ class NotificationProvider(ABC):
             True if delivered successfully, False otherwise.
         """
 
-    def _format_message(self, notify: Notification) -> str:
+    def _format_message(
+        self, notify: Notification, *, escape: Callable[[str], str] | None = None
+    ) -> str:
         """Format the per-episode notification message.
 
         Uses the provider's configured ``template`` when set, substituting
@@ -102,17 +106,26 @@ class NotificationProvider(ABC):
             Formatted message string.
         """
         if not self.template:
-            return (
+            default = (
                 f"番剧名称：{notify.official_title}\n"
                 f"季度： 第{notify.season}季\n"
                 f"更新集数： 第{notify.episode}集"
             )
+            return escape(default) if escape else default
         replacements = {
             "{{title}}": notify.official_title,
             "{{season}}": str(notify.season),
             "{{episode}}": str(notify.episode),
             "{{poster_url}}": self._poster_url(notify) or "",
         }
+        if escape:
+            # Substitute once so markup in a title or a literal {{episode}} in
+            # the title cannot become part of the configured template.
+            return re.sub(
+                r"\{\{(?:title|season|episode|poster_url)\}\}",
+                lambda match: escape(replacements[match[0]]),
+                self.template,
+            )
         rendered = self.template
         for pattern, value in replacements.items():
             rendered = rendered.replace(pattern, value)

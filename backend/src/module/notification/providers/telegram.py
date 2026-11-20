@@ -4,6 +4,7 @@ import json
 import logging
 import re
 from contextvars import ContextVar
+from html import escape as escape_html
 from mimetypes import guess_type
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Literal
@@ -11,6 +12,7 @@ from typing import TYPE_CHECKING, Literal
 import httpx2
 
 from module.models.bangumi import Notification
+from module.models.config import TelegramProviderConfig
 from module.network.request_url import get_shared_client
 from module.notification.base import NotificationProvider
 from module.utils import load_image, load_poster_url
@@ -36,6 +38,17 @@ class TelegramProvider(NotificationProvider):
         super().__init__(config)
         self._token = config.token
         self.chat_id = config.chat_id
+        self.options = TelegramProviderConfig.model_validate(config).telegram
+
+    def _escape_text(self, value: str) -> str:
+        mode = self.options.parse_mode
+        if mode == "HTML":
+            return escape_html(value)
+        if mode == "MarkdownV2":
+            return re.sub(r"([_*\[\]()~`>#+\-=|{}.!\\])", r"\\\1", value)
+        if mode == "Markdown":
+            return re.sub(r"([_*`\[])", r"\\\1", value)
+        return value
 
     async def _post(
         self,
@@ -94,10 +107,12 @@ class TelegramProvider(NotificationProvider):
         )
 
     async def _send_text(self, text: str, *, test: bool = False) -> None:
-        payload = {"chat_id": self.chat_id, "text": text}
+        payload = self.options.send_parameters()
         if not test:
-            payload["disable_notification"] = True
-        await self._post("sendMessage", payload)
+            payload.setdefault("disable_notification", True)
+        await self._post(
+            "sendMessage", {**payload, "chat_id": self.chat_id, "text": text}
+        )
 
     async def _try_photo(
         self, payload: dict, photo: tuple[str, bytes, str] | None = None
@@ -107,9 +122,8 @@ class TelegramProvider(NotificationProvider):
             return True
         except TelegramDeliveryError as exc:
             if exc.code == 400:
-                return (
-                    False  # Telegram rejected it; the next poster source can be tried.
-                )
+                # Telegram rejected the photo, so another source can be tried.
+                return False
             raise
 
     async def _send_poster(self, path: str | None, caption: str) -> bool:
@@ -117,6 +131,7 @@ class TelegramProvider(NotificationProvider):
             "chat_id": self.chat_id,
             "caption": caption,
             "disable_notification": True,
+            **self.options.send_parameters(photo=True),
         }
         source = await load_poster_url(path)
         if source and await self._try_photo({**payload, "photo": source}):
@@ -134,9 +149,13 @@ class TelegramProvider(NotificationProvider):
         return False
 
     async def send(self, notification: Notification) -> bool:
-        text = self._format_message(notification)
+        text = self._format_message(
+            notification, escape=self._escape_text if self.options.parse_mode else None
+        )
         try:
-            if await self._send_poster(notification.poster_path, text):
+            if self.options.include_poster and await self._send_poster(
+                notification.poster_path, text
+            ):
                 return True
             await self._send_text(text)
             return True
@@ -146,7 +165,7 @@ class TelegramProvider(NotificationProvider):
 
     async def _deliver_text(self, title: str, body: str) -> bool:
         try:
-            await self._send_text(f"{title}\n{body}")
+            await self._send_text(self._escape_text(f"{title}\n{body}"))
             return True
         except TelegramDeliveryError as exc:
             logger.warning("Telegram event delivery failed (code %s)", exc.code)
@@ -155,7 +174,10 @@ class TelegramProvider(NotificationProvider):
     async def test(self) -> tuple[bool, str]:
         try:
             await self._send_text(
-                "AutoBangumi 通知测试成功！\nNotification test successful!", test=True
+                self._escape_text(
+                    "AutoBangumi 通知测试成功！\nNotification test successful!"
+                ),
+                test=True,
             )
             return True, "Telegram test message sent successfully"
         except TelegramDeliveryError as exc:

@@ -2,6 +2,8 @@
 
 import json
 import logging
+from email import policy
+from email.parser import BytesParser
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx2
@@ -363,6 +365,146 @@ class TestTelegramProvider:
             "text": "标题\n正文",
             "disable_notification": True,
         }
+
+    async def test_configured_text_only_episode_skips_poster_and_preserves_markup(
+        self, telegram, poster, episode
+    ):
+        keyboard = {
+            "inline_keyboard": [[{"text": "Open", "url": "https://example.test"}]]
+        }
+        provider = TelegramProvider(
+            ProviderConfig.model_validate(
+                {
+                    "type": "telegram",
+                    "token": "bot",
+                    "chat_id": "@episodes",
+                    "template": "<b>{{title}}</b> S{{season}}E{{episode}}",
+                    "telegram": {
+                        "include_poster": False,
+                        "message_thread_id": 42,
+                        "disable_notification": False,
+                        "protect_content": True,
+                        "parse_mode": "HTML",
+                        "reply_markup": keyboard,
+                        "text_parameters": {
+                            "link_preview_options": {"is_disabled": True}
+                        },
+                        "photo_parameters": {"has_spoiler": True},
+                    },
+                }
+            )
+        )
+        episode.official_title = "A < B & {{season}}"
+        assert await provider.send(episode)
+        (request,) = telegram[0]
+        assert json.loads(request.content) == {
+            "chat_id": "@episodes",
+            "text": "<b>A &lt; B &amp; {{season}}</b> S1E5",
+            "parse_mode": "HTML",
+            "disable_notification": False,
+            "protect_content": True,
+            "message_thread_id": 42,
+            "reply_markup": keyboard,
+            "link_preview_options": {"is_disabled": True},
+        }
+        for loader in poster:
+            loader.assert_not_awaited()
+
+    async def test_cached_poster_and_text_fallback_keep_topic_and_method_options(
+        self, telegram, poster, episode
+    ):
+        keyboard = {
+            "inline_keyboard": [[{"text": "番組", "url": "https://example.test"}]]
+        }
+        provider = TelegramProvider(
+            ProviderConfig.model_validate(
+                {
+                    "type": "telegram",
+                    "token": "bot",
+                    "chat_id": "123",
+                    "telegram": {
+                        "message_thread_id": 99,
+                        "reply_markup": keyboard,
+                        "disable_notification": False,
+                        "photo_parameters": {"has_spoiler": True},
+                        "text_parameters": {
+                            "link_preview_options": {"is_disabled": True}
+                        },
+                    },
+                }
+            )
+        )
+        requests, replies = telegram
+        replies.append(
+            httpx2.Response(
+                400, json={"ok": False, "error_code": 400, "description": "Bad photo"}
+            )
+        )
+        poster[1].return_value = b"poster"
+        assert await provider.send(episode)
+        photo, fallback = requests
+        form = BytesParser(policy=policy.default).parsebytes(
+            f"Content-Type: {photo.headers['content-type']}\r\n\r\n".encode()
+            + photo.content
+        )
+        fields = {
+            part.get_param("name", header="content-disposition"): part.get_payload(
+                decode=True
+            )
+            for part in form.iter_parts()
+        }
+        markup = fields["reply_markup"]
+        assert isinstance(markup, bytes) and json.loads(markup) == keyboard
+        assert (
+            fields["message_thread_id"] == b"99"
+            and fields["disable_notification"] == b"false"
+        )
+        assert fields["has_spoiler"] == b"true" and "link_preview_options" not in fields
+        result = json.loads(fallback.content)
+        assert result["message_thread_id"] == 99 and result["reply_markup"] == keyboard
+        assert (
+            result["link_preview_options"]["is_disabled"]
+            and "has_spoiler" not in result
+        )
+
+    @pytest.mark.parametrize(
+        ("mode", "expected"),
+        [
+            ("HTML", "&lt;A&gt; &amp; B_"),
+            ("MarkdownV2", r"<A\> & B\_"),
+            ("Markdown", r"<A> & B\_"),
+        ],
+    )
+    async def test_system_event_and_test_message_apply_shared_settings(
+        self, telegram, mode, expected
+    ):
+        provider = TelegramProvider(
+            ProviderConfig.model_validate(
+                {
+                    "type": "telegram",
+                    "token": "bot",
+                    "chat_id": "123",
+                    "telegram": {
+                        "parse_mode": mode,
+                        "disable_notification": False,
+                        "message_thread_id": 5,
+                    },
+                }
+            )
+        )
+        assert await provider.send_event(
+            RssFailureEvent(rss_name="<A> & B_", rss_url="feed", error="offline")
+        )
+        assert (await provider.test())[0]
+        event, test = [json.loads(req.content) for req in telegram[0]]
+        assert expected in event["text"]
+        for sent in (event, test):
+            assert (
+                sent["message_thread_id"] == 5 and sent["disable_notification"] is False
+            )
+            assert sent["parse_mode"] == mode
+        if mode == "MarkdownV2":
+            assert test["text"].endswith(r"successful\!")
 
 
 class TestDiscordProvider:

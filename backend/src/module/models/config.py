@@ -1,10 +1,11 @@
 from dataclasses import dataclass
 from os.path import expandvars
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
 
 from ab_sdk.rename import CORE_ID
+from module.models.telegram import TelegramSettings
 
 
 def _expand(value: str | None) -> str:
@@ -229,11 +230,38 @@ class NotificationProvider(BaseModel):
         return _expand(self.url_)
 
 
+class TelegramProviderConfig(NotificationProvider):
+    telegram: TelegramSettings = Field(default_factory=TelegramSettings)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_provider_model(cls, value):
+        if isinstance(value, NotificationProvider) and not isinstance(value, cls):
+            return value.model_dump(by_alias=True)
+        return value
+
+
+def _provider_kind(value) -> str:
+    kind = (
+        value.get("type") if isinstance(value, dict) else getattr(value, "type", None)
+    )
+    return (
+        "telegram" if isinstance(kind, str) and kind.lower() == "telegram" else "other"
+    )
+
+
+type ProviderEntry = Annotated[
+    Annotated[TelegramProviderConfig, Tag("telegram")]
+    | Annotated[NotificationProvider, Tag("other")],
+    Discriminator(_provider_kind),
+]
+
+
 class Notification(BaseModel):
     """Notification configuration supporting multiple providers."""
 
     enable: bool = Field(default=False, description="Enable notification system")
-    providers: list[NotificationProvider] = Field(
+    providers: list[ProviderEntry] = Field(
         default_factory=list, description="List of notification providers"
     )
     base_url: str = Field(
