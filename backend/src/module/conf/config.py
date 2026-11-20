@@ -5,7 +5,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from module.models.config import Config
+from module.models.config import Config, TelegramProviderConfig
 from module.update.v4 import migrate_v3_config, migrate_v3_dict
 
 from .const import ENV_TO_ATTR
@@ -81,17 +81,24 @@ class Settings(Config):
         if CONFIG_PATH.exists():
             # 必须先于 load / save：否则 3.3 的下载器等字段会被当作未知字段丢弃
             migrate_v3_config(CONFIG_PATH)
-            self.load()
-            self.save()
+            self.load(write_back=True)
         else:
             self.init()
 
-    def load(self):
+    def load(self, *, write_back: bool = False):
         """Load and validate configuration from ``CONFIG_PATH``, applying migrations."""
         with open(CONFIG_PATH, encoding="utf-8") as f:
             config = json.load(f)
         config = self._migrate_old_config(config)
         config_obj = Config.model_validate(config)
+        # A wizard or file edit can introduce a legacy row during a live reload.
+        # Persist its new identity before returning it to an editor.
+        if write_back or any(
+            isinstance(row, TelegramProviderConfig)
+            and "row_id" not in row.model_fields_set
+            for row in config_obj.notification.providers
+        ):
+            self.save(config_dict=config_obj.model_dump())
         self.__dict__.update(config_obj.__dict__)
         # 每次 reload/重启都会触发 load，INFO 级别会在日志里反复刷屏
         logger.debug("Config loaded")

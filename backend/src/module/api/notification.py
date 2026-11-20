@@ -19,7 +19,7 @@ from module.notification import NotificationManager
 from module.notification.inbox import bump_inbox_revision
 from module.security.api import get_current_user
 
-from .config import MaskRestoreError, _is_provider_secret, _restore_masked
+from .config import MaskRestoreError, restore_telegram_secrets
 
 logger = logging.getLogger(__name__)
 router = APIRouter(
@@ -98,13 +98,18 @@ async def test_provider_config(
             or rows[saved_provider_index].type.lower() != "telegram"
         ):
             raise HTTPException(422, "The selected saved provider must be Telegram.")
+        saved = rows[saved_provider_index]
+        if "row_id" in config.model_fields_set and (
+            not isinstance(saved, TelegramProviderConfig)
+            or saved.row_id != config.row_id
+        ):
+            raise HTTPException(
+                422,
+                "The saved Telegram row has moved or been replaced. Reload the settings.",
+            )
         data = config.model_dump(by_alias=True)
         try:
-            _restore_masked(
-                data,
-                rows[saved_provider_index].model_dump(by_alias=True),
-                _is_provider_secret,
-            )
+            restore_telegram_secrets(data, saved.model_dump(by_alias=True))
         except MaskRestoreError as exc:
             raise HTTPException(422, str(exc)) from None
         config = TelegramProviderConfig.model_validate(data)

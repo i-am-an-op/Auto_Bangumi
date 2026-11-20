@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from os.path import expandvars
 from typing import Annotated, Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
 
@@ -231,6 +232,11 @@ class NotificationProvider(BaseModel):
 
 
 class TelegramProviderConfig(NotificationProvider):
+    row_id: str = Field(
+        default_factory=lambda: uuid4().hex,
+        pattern=r"^[0-9a-f]{32}$",
+        description="Opaque saved row identity. Echo it when editing a Telegram provider.",
+    )
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
 
     @model_validator(mode="before")
@@ -271,6 +277,17 @@ class Notification(BaseModel):
             "notification providers. Empty = omit the poster field entirely."
         ),
     )
+
+    @model_validator(mode="after")
+    def unique_telegram_row_ids(self):
+        ids = [
+            row.row_id
+            for row in self.providers
+            if isinstance(row, TelegramProviderConfig)
+        ]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Each Telegram provider must have a distinct row_id.")
+        return self
 
 
 class LLMProviderOverride(BaseModel):

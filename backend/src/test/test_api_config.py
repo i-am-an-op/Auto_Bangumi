@@ -1,5 +1,6 @@
 """Tests for Config API endpoints and config sanitization."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx2
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 from module.api import v1
 from module.api.config import _restore_masked, _sanitize_dict
 from module.api.deps import get_context
+from module.conf.config import Settings
 from module.models.config import Config
 from module.security.api import get_current_user
 
@@ -709,6 +711,166 @@ class TestRestoreMasked:
         )
         assert rows[2]["telegram"]["parse_mode"] == "private"
         assert rows[3]["telegram"]["reply_markup"]["inline_keyboard"] == [[new_button]]
+
+    @pytest.fixture
+    def two_telegram_bots(self, tmp_path, monkeypatch, mock_ctx):
+        # Start with an existing config file, as an installation upgrading in place would.
+        path = tmp_path / "config.json"
+        legacy = Config().model_dump()
+        legacy["notification"]["providers"] = [
+            {
+                "type": "telegram",
+                "chat_id": "-100",
+                "token": token,
+                "telegram": {"message_thread_id": topic},
+            }
+            for token, topic in [("101:testA", 42), ("102:testB", 73)]
+        ]
+        path.write_text(json.dumps(legacy))
+        monkeypatch.setattr("module.conf.config.CONFIG_PATH", path)
+        local = Settings()
+        for target in (
+            "module.api.config.settings",
+            "module.api.notification.settings",
+            "module.notification.manager.settings",
+        ):
+            monkeypatch.setattr(target, local)
+        mock_ctx.reload_settings.side_effect = local.load
+        return path
+
+    def test_swapping_telegram_topics_preserves_the_bots_after_save(
+        self, authed_client, two_telegram_bots, monkeypatch
+    ):
+        path = two_telegram_bots
+        client = AsyncMock(spec=httpx2.AsyncClient)
+        client.post.return_value = httpx2.Response(
+            200, json={"ok": True, "result": {"message_id": 1}}
+        )
+        monkeypatch.setattr(
+            "module.notification.providers.telegram.get_shared_client",
+            AsyncMock(return_value=client),
+        )
+
+        data = authed_client.get("/api/v1/config/get").json()
+        rows = data["notification"]["providers"]
+        row_ids = [row["row_id"] for row in rows]
+        assert len(set(row_ids)) == 2 and "********" not in row_ids
+        restarted = Settings().model_dump()["notification"]["providers"]
+        assert [row["row_id"] for row in restarted] == row_ids
+        for index, (row, topic) in enumerate(zip(rows, (73, 42), strict=True)):
+            assert row["token"] == "********"
+            row["telegram"]["message_thread_id"] = topic
+            reply = authed_client.post(
+                "/api/v1/notification/test-config",
+                params={"saved_provider_index": index},
+                json=row,
+            )
+            assert reply.json()["success"]
+        assert (
+            authed_client.patch("/api/v1/config/update", json=data).status_code == 200
+        )
+        saved = json.loads(path.read_text())["notification"]["providers"]
+        assert [
+            (row["token"], row["telegram"]["message_thread_id"]) for row in saved
+        ] == [("101:testA", 73), ("102:testB", 42)]
+        assert [row["row_id"] for row in saved] == row_ids
+        for index in range(2):
+            assert authed_client.post(
+                "/api/v1/notification/test", json={"provider_index": index}
+            ).json()["success"]
+        deliveries = [
+            (call.args[0], call.kwargs["json"]["message_thread_id"])
+            for call in client.post.await_args_list
+        ]
+        assert (
+            deliveries
+            == [
+                ("https://api.telegram.org/bot101:testA/sendMessage", 73),
+                ("https://api.telegram.org/bot102:testB/sendMessage", 42),
+            ]
+            * 2
+        )
+
+    def test_deleted_or_duplicate_telegram_reference_cannot_borrow_a_bot(
+        self, authed_client, two_telegram_bots
+    ):
+        data = authed_client.get("/api/v1/config/get").json()
+        removed, kept = data["notification"]["providers"]
+        data["notification"]["providers"] = [kept]
+        assert (
+            authed_client.patch("/api/v1/config/update", json=data).status_code == 200
+        )
+        committed = two_telegram_bots.read_bytes()
+        # Index zero now belongs to the other bot, even if the destinations coincide.
+        removed["telegram"] = kept["telegram"]
+        draft = authed_client.post(
+            "/api/v1/notification/test-config",
+            params={"saved_provider_index": 0},
+            json=removed,
+        )
+        assert draft.status_code == 422
+        data["notification"]["providers"] = [removed]
+        assert (
+            authed_client.patch("/api/v1/config/update", json=data).status_code == 400
+        )
+        data["notification"]["providers"] = [kept, kept]
+        assert (
+            authed_client.patch("/api/v1/config/update", json=data).status_code == 422
+        )
+        assert two_telegram_bots.read_bytes() == committed
+
+    def test_legacy_mask_needs_an_unambiguous_saved_row(
+        self, authed_client, two_telegram_bots
+    ):
+        data = authed_client.get("/api/v1/config/get").json()
+        kept = data["notification"]["providers"][1]
+        old_client_row = {k: v for k, v in kept.items() if k != "row_id"}
+        data["notification"]["providers"] = [old_client_row]
+        assert (
+            authed_client.patch("/api/v1/config/update", json=data).status_code == 400
+        )
+        # Once only B exists, a legacy client can still edit it with a masked token.
+        data["notification"]["providers"] = [kept]
+        assert (
+            authed_client.patch("/api/v1/config/update", json=data).status_code == 200
+        )
+        old_client_row["telegram"]["message_thread_id"] = 100
+        data["notification"]["providers"] = [old_client_row]
+        assert (
+            authed_client.patch("/api/v1/config/update", json=data).status_code == 200
+        )
+        [saved] = json.loads(two_telegram_bots.read_text())["notification"]["providers"]
+        assert (saved["row_id"], saved["token"]) == (kept["row_id"], "102:testB")
+
+    def test_retry_new_telegram_rows_before_refetch(
+        self, authed_client, two_telegram_bots
+    ):
+        data = authed_client.get("/api/v1/config/get").json()
+        draft = {
+            "type": "Telegram",
+            "token": "103:new",
+            "chat_id": "new",
+            "telegram": {"message_thread_id": 10},
+        }
+        data["notification"]["providers"].append(draft)
+        assert (
+            authed_client.patch("/api/v1/config/update", json=data).status_code == 200
+        )
+        new_id = authed_client.get("/api/v1/config/get").json()["notification"][
+            "providers"
+        ][-1]["row_id"]
+        draft["telegram"]["message_thread_id"] = 11
+        assert (
+            authed_client.patch("/api/v1/config/update", json=data).status_code == 200
+        )
+        saved = json.loads(two_telegram_bots.read_text())["notification"]["providers"][
+            -1
+        ]
+        assert (
+            saved["row_id"],
+            saved["token"],
+            saved["telegram"]["message_thread_id"],
+        ) == (new_id, "103:new", 11)
 
     def test_saved_and_edited_telegram_tests_use_real_delivery(
         self, authed_client, monkeypatch

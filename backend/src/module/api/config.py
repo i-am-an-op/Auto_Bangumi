@@ -9,7 +9,11 @@ from pydantic import BaseModel
 from module.conf import settings
 from module.core import AppContext
 from module.models import APIResponse, Config
-from module.models.config import NotificationProvider
+from module.models.config import (
+    NotificationProvider,
+    ProviderEntry,
+    TelegramProviderConfig,
+)
 from module.parser.analyser.llm import LLMParser
 from module.plugin.secrets import mask_options, restore_options
 from module.security.api import UNAUTHORIZED, get_current_user
@@ -94,12 +98,6 @@ def _identity(d: dict, sensitive: Sensitive) -> tuple:
         for k, v in d.items()
         if not isinstance(v, (dict, list)) and not sensitive(k)
     }
-    # Two Telegram rows can send to different topics in the same chat.
-    if sensitive is _is_provider_secret and str(d.get("type")).lower() == "telegram":
-        options = d.get("telegram")
-        fields["telegram.message_thread_id"] = (
-            options.get("message_thread_id") if isinstance(options, dict) else None
-        )
     return tuple(sorted(fields.items()))
 
 
@@ -208,6 +206,71 @@ def _plugin_schemas(ctx: AppContext) -> dict[str, dict | None]:
     return {status.id: status.config_schema for status in ctx.plugins.statuses()}
 
 
+def _is_telegram(row: dict) -> bool:
+    return str(row.get("type")).lower() == "telegram"
+
+
+def _public_provider(row: dict) -> dict:
+    result = _sanitize_dict(row, _is_provider_secret)
+    if _is_telegram(row) and "row_id" in row:
+        result["row_id"] = row["row_id"]
+    return result
+
+
+def restore_telegram_secrets(row: dict, saved: dict | None) -> None:
+    if saved is not None:
+        _restore_masked(row, saved, _is_provider_secret)
+    if _contains_mask(row, _is_provider_secret):
+        raise MaskRestoreError(
+            "Reload the saved Telegram provider or re-enter its masked credentials."
+        )
+
+
+def _restore_providers(
+    providers: list[ProviderEntry], current: list[dict]
+) -> list[dict]:
+    rows = [p.model_dump(by_alias=True) for p in providers]
+    _restore_masked_list(
+        [row for row in rows if not _is_telegram(row)],
+        [row for row in current if not _is_telegram(row)],
+        _is_provider_secret,
+    )
+    available = {
+        row["row_id"]: row for row in current if _is_telegram(row) and "row_id" in row
+    }
+    without_id = []
+    for provider, row in zip(providers, rows, strict=True):
+        if isinstance(provider, TelegramProviderConfig):
+            if "row_id" in provider.model_fields_set:
+                restore_telegram_secrets(row, available.pop(provider.row_id, None))
+            else:
+                without_id.append(row)
+
+    # A newly added WebUI row still holds its explicit token until the next GET.
+    # Reuse its ID on subsequent saves when the token identifies a single row.
+    # Reserve those matches before restoring masks from older clients.
+    for row in sorted(
+        without_id, key=lambda item: _contains_mask(item, _is_provider_secret)
+    ):
+        candidates = list(available.values())
+        if row.get("token") != _MASK:
+            candidates = [
+                old for old in candidates if old.get("token") == row.get("token")
+            ]
+            if len(candidates) > 1:
+                candidates = [
+                    old
+                    for old in candidates
+                    if (old | {"row_id": row["row_id"]}) == row
+                ]
+        saved = None
+        if len(candidates) == 1:
+            row["row_id"] = candidates[0]["row_id"]
+            saved = available.pop(row["row_id"])
+        restore_telegram_secrets(row, saved)
+    return rows
+
+
 @router.get("/get")
 async def get_config(ctx: AppContext = Depends(get_context)):
     """Return the current configuration with sensitive fields masked."""
@@ -217,9 +280,7 @@ async def get_config(ctx: AppContext = Depends(get_context)):
     for plugin_id, plugin_options in options.items():
         options[plugin_id] = mask_options(plugin_options, schemas.get(plugin_id))
     notification = config["notification"]
-    notification["providers"] = [
-        _sanitize_dict(p, _is_provider_secret) for p in notification["providers"]
-    ]
+    notification["providers"] = [_public_provider(p) for p in notification["providers"]]
     return _sanitize_dict(config)
 
 
@@ -227,7 +288,7 @@ async def get_config(ctx: AppContext = Depends(get_context)):
 async def update_config(config: Config, ctx: AppContext = Depends(get_context)):
     """Persist and reload configuration from the supplied payload."""
     try:
-        config_dict = config.model_dump()
+        config_dict = config.model_dump(exclude={"notification": {"providers"}})
         current = settings.model_dump()
         schemas = _plugin_schemas(ctx)
         current_options = current.get("plugins", {}).get("options", {})
@@ -238,12 +299,11 @@ async def update_config(config: Config, ctx: AppContext = Depends(get_context)):
                 current_options.get(plugin_id, {}),
                 schemas.get(plugin_id),
             )
-        _restore_masked_list(
-            config_dict["notification"]["providers"],
+        _restore_masked(config_dict, current)
+        config_dict["notification"]["providers"] = _restore_providers(
+            config.notification.providers,
             current.get("notification", {}).get("providers", []),
-            _is_provider_secret,
         )
-        config_dict = _restore_masked(config_dict, current)
         # settings.save() does synchronous file I/O; keep it off the event loop.
         await asyncio.to_thread(settings.save, config_dict=config_dict)
         # reload_settings reloads from disk, resets the shared HTTP client,

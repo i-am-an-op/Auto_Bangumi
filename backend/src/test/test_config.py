@@ -185,6 +185,25 @@ class TestMigrateOldConfig:
 
 
 class TestSettingsLoad:
+    def test_live_reload_persists_identity_for_newly_configured_telegram_row(
+        self, tmp_path, monkeypatch
+    ):
+        path = tmp_path / "config.json"
+        monkeypatch.setattr("module.conf.config.CONFIG_PATH", path)
+        settings = Settings()
+        config = settings.model_dump()
+        config["notification"]["providers"] = [
+            {"type": "telegram", "token": "a", "chat_id": "42"}
+        ]
+        path.write_text(json.dumps(config))
+        settings.load()
+        saved = json.loads(path.read_text())["notification"]["providers"][0]
+        settings.load()
+        assert (
+            settings.model_dump()["notification"]["providers"][0]["row_id"]
+            == saved["row_id"]
+        )
+
     def test_load_from_json_file(self, tmp_path):
         """Settings loads config from a JSON file when it exists."""
         config_data = Config().model_dump()
