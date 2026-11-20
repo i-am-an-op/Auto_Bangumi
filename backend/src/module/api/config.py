@@ -43,23 +43,43 @@ def _is_provider_secret(key: str) -> bool:
     return _is_sensitive(key) or key not in _PROVIDER_FIELDS
 
 
+def _child_sensitive(parent: dict, key: str, sensitive: Sensitive) -> Sensitive:
+    if (
+        sensitive is _is_provider_secret
+        and key == "telegram"
+        and str(parent.get("type")).lower() == "telegram"
+    ):
+        # This is a declared Bot API payload. Keep labels and URLs editable
+        # while masking credential fields such as provider_token and secret_token.
+        return _is_sensitive
+    return sensitive
+
+
 def _sanitize_dict(d: dict, sensitive: Sensitive = _is_sensitive) -> dict:
     """Recursively mask string values whose keys contain sensitive keywords."""
     result: dict = {}
     for k, v in d.items():
         if isinstance(v, dict):
-            result[k] = _sanitize_dict(v, sensitive)
+            result[k] = _sanitize_dict(v, _child_sensitive(d, k, sensitive))
         elif isinstance(v, list):
-            result[k] = [
-                _sanitize_dict(item, sensitive) if isinstance(item, dict) else item
-                for item in v
-            ]
+            result[k] = _sanitize_list(v, sensitive)
         elif isinstance(v, str) and v and sensitive(k):
             # 空值不打掩码：否则未设置密码的字段在前端永远显示一串幻影
             # 掩码，用户误以为存了密码（并可能因此反复"删除保存"）。
             result[k] = _MASK
         else:
             result[k] = v
+    return result
+
+
+def _sanitize_list(items: list, sensitive: Sensitive) -> list:
+    result = []
+    for item in items:
+        if isinstance(item, dict):
+            item = _sanitize_dict(item, sensitive)
+        elif isinstance(item, list):
+            item = _sanitize_list(item, sensitive)
+        result.append(item)
     return result
 
 
@@ -98,6 +118,21 @@ def _restore_masked_list(
     （增/删）只接受唯一身份匹配——包括"两项身份完全相同、删了其中一个"
     的场景在内，凡无法唯一定位来源的掩码项直接报错，绝不猜。
     """
+    # JSON method parameters can contain arrays of arrays (inline keyboards).
+    # Match an unchanged masked row by content, including after a reorder.
+    for i, row in enumerate(incoming):
+        if isinstance(row, list) and _contains_mask(row):
+            matches = [
+                old
+                for old in current
+                if isinstance(old, list) and _sanitize_list(old, sensitive) == row
+            ]
+            if len(matches) == 1:
+                _restore_masked_list(row, matches[0], sensitive)
+            elif len(incoming) == len(current) and isinstance(current[i], list):
+                _restore_masked_list(row, current[i], sensitive)
+            else:
+                raise MaskRestoreError("Re-enter secrets in the changed list row.")
     masked = [
         i
         for i, item in enumerate(incoming)
@@ -150,9 +185,18 @@ def _restore_masked(
     incoming: dict, current: dict, sensitive: Sensitive = _is_sensitive
 ) -> dict:
     """Replace masked sentinel values with real values from current config."""
+    if (
+        sensitive is _is_provider_secret
+        and str(incoming.get("type")).lower() == "telegram"
+        and incoming.get("token") == _MASK
+        and (incoming.get("server_url") or "") != (current.get("server_url") or "")
+    ):
+        raise MaskRestoreError(
+            "Re-enter the Telegram bot token when changing its Bot API server."
+        )
     for k, v in incoming.items():
         if isinstance(v, dict) and isinstance(current.get(k), dict):
-            _restore_masked(v, current[k], sensitive)
+            _restore_masked(v, current[k], _child_sensitive(incoming, k, sensitive))
         elif isinstance(v, list) and isinstance(current.get(k), list):
             _restore_masked_list(v, current[k], sensitive)
         elif v == _MASK and sensitive(k):

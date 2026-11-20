@@ -633,6 +633,118 @@ class TestRestoreMasked:
         ]
         assert (saved["sendkey"], saved["webhook"]) == ("sk", "https://h")
 
+    def test_telegram_options_survive_get_edit_and_save(
+        self, authed_client, mock_settings
+    ):
+        config = Config.model_validate(
+            {
+                "notification": {
+                    "providers": [
+                        {
+                            "type": "telegram",
+                            "token": "bot-secret",
+                            "telegram": {
+                                "episode": {
+                                    "method": "sendInvoice",
+                                    "parameters": {
+                                        "provider_token": "payment-secret",
+                                        "description": "Episode",
+                                        "reply_markup": {
+                                            "inline_keyboard": [
+                                                [
+                                                    {
+                                                        "text": "Open",
+                                                        "url": "https://example.test",
+                                                        "future_secret": "nested-secret",
+                                                    }
+                                                ]
+                                            ]
+                                        },
+                                    },
+                                }
+                            },
+                        },
+                        {"type": "custom-channel", "telegram": {"method": "private"}},
+                    ]
+                }
+            }
+        )
+        mock_settings.model_dump.side_effect = config.model_dump
+        with patch("module.api.config.settings", mock_settings):
+            data = authed_client.get("/api/v1/config/get").json()
+            row, plugin = data["notification"]["providers"]
+            action = row["telegram"]["episode"]
+            assert plugin["telegram"]["method"] == "********"
+            assert row["token"] == action["parameters"]["provider_token"] == "********"
+            assert action["method"] == "sendInvoice"
+            assert (
+                action["parameters"]["reply_markup"]["inline_keyboard"][0][0][
+                    "future_secret"
+                ]
+                == "********"
+            )
+            assert (
+                action["parameters"]["reply_markup"]["inline_keyboard"][0][0]["text"]
+                == "Open"
+            )
+            action["parameters"]["description"] = "New episode"
+            assert (
+                authed_client.patch("/api/v1/config/update", json=data).status_code
+                == 200
+            )
+            saved = mock_settings.save.call_args.kwargs["config_dict"]["notification"][
+                "providers"
+            ][0]
+            assert saved["token"] == "bot-secret"
+            assert (
+                saved["telegram"]["episode"]["parameters"]["reply_markup"][
+                    "inline_keyboard"
+                ][0][0]["future_secret"]
+                == "nested-secret"
+            )
+            assert (
+                saved["telegram"]["episode"]["parameters"]["provider_token"]
+                == "payment-secret"
+            )
+            row["server_url"] = "http://bot-api.test:8081"
+            assert (
+                authed_client.patch("/api/v1/config/update", json=data).status_code
+                == 400
+            )
+
+    def test_telegram_draft_uses_saved_settings_schema(self, authed_client):
+        row = {
+            "type": "TELEGRAM",
+            "token": "draft-token",
+            "telegram": {
+                "test_environment": True,
+                "event": {
+                    "method": "futureMethod",
+                    "parameters": {"new_option": [False]},
+                },
+            },
+        }
+        with patch(
+            "module.api.notification.NotificationManager.test_provider_config",
+            AsyncMock(return_value=(True, "ok")),
+        ) as tested:
+            response = authed_client.post("/api/v1/notification/test-config", json=row)
+            assert response.status_code == 200 and response.json()["success"]
+            assert tested.await_args is not None
+            (config,) = tested.await_args.args
+            assert (
+                config.telegram.test_environment
+                and config.telegram.event.method == "futureMethod"
+            )
+            row["telegram"]["event"]["method"] = "../other"
+            assert (
+                authed_client.post(
+                    "/api/v1/notification/test-config", json=row
+                ).status_code
+                == 422
+            )
+            tested.assert_awaited_once()
+
     def test_update_config_preserves_password_when_masked(
         self, authed_client, mock_settings
     ):

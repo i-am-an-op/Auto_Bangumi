@@ -11,9 +11,9 @@ from urllib.parse import quote, urlsplit
 
 import httpx2
 
+from module.models.telegram import METHOD_PATTERN
 from module.network.request_url import get_shared_client
 
-METHOD_PATTERN = r"^[A-Za-z][A-Za-z0-9]*$"
 DEFAULT_SERVER = "https://api.telegram.org"
 
 # HTTPX logs the complete URL at INFO. Suppress that record only for the

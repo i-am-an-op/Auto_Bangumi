@@ -26,6 +26,7 @@ from module.notification.providers import (
     WebhookProvider,
     WecomProvider,
 )
+from module.notification.telegram_api import TelegramError
 
 # ---------------------------------------------------------------------------
 # Provider Registry
@@ -202,110 +203,167 @@ class TestNotificationManager:
 class TestTelegramProvider:
     @pytest.fixture
     def provider(self):
-        config = ProviderConfig(
-            type="telegram", enabled=True, token="test_token", chat_id="12345"
+        return TelegramProvider(
+            ProviderConfig(type="telegram", token="test_token", chat_id="12345")
         )
-        return TelegramProvider(config)
 
-    async def test_send_with_photo(self, provider):
-        """Sends photo when poster available."""
-        notify = Notification(
+    @pytest.fixture
+    def poster(self, monkeypatch):
+        source = AsyncMock(return_value=None)
+        image = AsyncMock(return_value=None)
+        monkeypatch.setattr(
+            "module.notification.providers.telegram.load_poster_url", source
+        )
+        monkeypatch.setattr("module.notification.providers.telegram.load_image", image)
+        return source, image
+
+    @pytest.fixture
+    def episode(self):
+        return Notification(
             official_title="Test Anime",
             season=1,
             episode=5,
-            poster_path="/path/to/poster.jpg",
+            poster_path="posters/cover.jpg",
         )
 
-        with patch.object(provider, "post_files", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = MagicMock(status_code=200)
-            with patch(
-                "module.notification.providers.telegram.load_image"
-            ) as mock_load:
-                mock_load.return_value = b"image_data"
-                result = await provider.send(notify)
+    async def test_send_with_photo(self, provider, poster, episode):
+        poster[1].return_value = b"image"
+        with patch.object(provider.api, "call", AsyncMock()) as call:
+            assert await provider.send(episode)
+        method, params = call.call_args.args
+        assert method == "sendPhoto"
+        assert params["caption"].endswith("第5集") and "text" not in params
+        assert call.call_args.kwargs["files"] == {
+            "photo": ("cover.jpg", b"image", "image/jpeg")
+        }
 
-        assert result is True
-        mock_post.assert_called_once()
+    async def test_send_without_photo(self, provider, poster, episode):
+        with patch.object(provider.api, "call", AsyncMock()) as call:
+            assert await provider.send(episode)
+        method, params = call.call_args.args
+        assert method == "sendMessage" and params["disable_notification"] is True
+        assert params["chat_id"] == "12345" and "caption" not in params
 
-    async def test_send_without_photo(self, provider):
-        """Sends text when no poster available."""
-        notify = Notification(official_title="Test Anime", season=1, episode=5)
+    async def test_send_prefers_poster_source_url(self, provider, poster, episode):
+        poster[0].return_value = "https://mikanani.me/img/a.jpg"
+        with patch.object(provider.api, "call", AsyncMock()) as call:
+            assert await provider.send(episode)
+        assert call.call_args.args[0] == "sendPhoto"
+        assert call.call_args.args[1]["photo"] == poster[0].return_value
+        poster[1].assert_not_awaited()
 
-        with patch.object(provider, "post_data", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = MagicMock(status_code=200)
-            with patch(
-                "module.notification.providers.telegram.load_image"
-            ) as mock_load:
-                mock_load.return_value = None
-                result = await provider.send(notify)
+    async def test_send_falls_back_after_rejected_photos(
+        self, provider, poster, episode
+    ):
+        poster[0].return_value = "https://example.test/rejected.jpg"
+        poster[1].return_value = b"image"
+        rejected = TelegramError("Bad photo", 400, {"error_code": 400})
+        with patch.object(
+            provider.api, "call", AsyncMock(side_effect=[rejected, rejected, {}])
+        ) as call:
+            assert await provider.send(episode)
+        assert [args.args[0] for args in call.await_args_list] == [
+            "sendPhoto",
+            "sendPhoto",
+            "sendMessage",
+        ]
 
-        assert result is True
-        mock_post.assert_called_once()
-
-    async def test_send_prefers_poster_source_url(self, provider):
-        """有源 URL 时默认让 Telegram 服务端按 URL 拉图，不做本地上传（#1094）。"""
-        notify = Notification(
-            official_title="Test Anime",
-            season=1,
-            episode=5,
-            poster_path="posters/abc123.jpg",
-        )
-
-        with patch.object(provider, "post_data", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = MagicMock(status_code=200)
-            with patch(
-                "module.notification.providers.telegram.load_poster_url",
-                new_callable=AsyncMock,
-            ) as mock_url:
-                mock_url.return_value = "https://mikanani.me/img/a.jpg"
-                with patch(
-                    "module.notification.providers.telegram.load_image",
-                    new_callable=AsyncMock,
-                ) as mock_load:
-                    result = await provider.send(notify)
-
-        assert result is True
-        mock_post.assert_called_once()
-        assert mock_post.call_args[0][0] == provider.photo_url
-        assert mock_post.call_args[0][1]["photo"] == "https://mikanani.me/img/a.jpg"
-        mock_load.assert_not_called()
-
-    async def test_send_falls_back_to_text_when_photo_send_fails(self, provider):
-        """sendPhoto 失败（返回 None）不再崩溃，降级发纯文本消息（#1094）。"""
-        notify = Notification(
-            official_title="Test Anime",
-            season=1,
-            episode=5,
-            poster_path="posters/abc123.jpg",
-        )
-
-        with patch.object(provider, "post_data", new_callable=AsyncMock) as mock_post:
-            mock_post.side_effect = [None, MagicMock(status_code=200)]
-            with patch(
-                "module.notification.providers.telegram.load_poster_url",
-                new_callable=AsyncMock,
-            ) as mock_url:
-                mock_url.return_value = "https://mikanani.me/img/a.jpg"
-                with patch(
-                    "module.notification.providers.telegram.load_image",
-                    new_callable=AsyncMock,
-                ) as mock_load:
-                    mock_load.return_value = None
-                    result = await provider.send(notify)
-
-        assert result is True
-        assert mock_post.call_count == 2
-        assert mock_post.call_args_list[0][0][0] == provider.photo_url
-        assert mock_post.call_args_list[1][0][0] == provider.message_url
+    async def test_ambiguous_send_is_not_replayed(self, provider, poster, episode):
+        poster[0].return_value = "https://example.test/cover.jpg"
+        with patch.object(
+            provider.api, "call", AsyncMock(side_effect=TelegramError("Timeout", 504))
+        ) as call:
+            assert not await provider.send(episode)
+        call.assert_awaited_once()
+        poster[1].assert_not_awaited()
 
     async def test_test_success(self, provider):
-        """Test method sends test message."""
-        with patch.object(provider, "post_data", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = MagicMock(status_code=200)
+        with patch.object(provider.api, "call", AsyncMock()) as call:
             success, message = await provider.test()
+        assert success and "successfully" in message.lower()
+        assert call.call_args.args[0] == "sendMessage"
 
-        assert success is True
-        assert "successfully" in message.lower()
+    async def test_advanced_episode_and_event(self, poster, episode):
+        config = ProviderConfig.model_validate(
+            {
+                "type": "TELEGRAM",
+                "token": "token",
+                "chat_id": "@target",
+                "telegram": {
+                    "episode": {
+                        "method": "sendMediaGroup",
+                        "attach_poster": True,
+                        "parameters": {
+                            "chat_id": "{{chat_id}}",
+                            "media": [
+                                {
+                                    "media": "attach://poster",
+                                    "caption": "{{title}}: {{episode}}",
+                                }
+                            ],
+                            "future_number": "{{season}}",
+                        },
+                    },
+                    "event": {
+                        "method": "futureMethod",
+                        "parameters": {"content": ["{{title}}", "{{body}}", False]},
+                    },
+                },
+            }
+        )
+        provider = TelegramProvider(config)
+        poster[1].return_value = b"png"
+        episode.official_title = "Title with {{season}}"
+        with patch.object(provider.api, "call", AsyncMock()) as call:
+            assert await provider.send(episode)
+            method, params = call.call_args.args
+            assert method == "sendMediaGroup" and params["future_number"] == 1
+            assert params["media"][0]["caption"] == "Title with {{season}}: 5"
+            assert call.call_args.kwargs["files"]["poster"][1] == b"png"
+            assert await provider._deliver_text("Alert", "Body")
+            assert call.call_args.args == (
+                "futureMethod",
+                {"content": ["Alert", "Body", False]},
+            )
+
+    async def test_parameters_apply_to_ordinary_delivery(self, poster, episode):
+        config = ProviderConfig.model_validate(
+            {
+                "type": "telegram",
+                "token": "token",
+                "chat_id": "123",
+                "telegram": {
+                    "text_parameters": {
+                        "disable_notification": False,
+                        "message_thread_id": 42,
+                    },
+                    "photo_parameters": {"has_spoiler": True},
+                },
+            }
+        )
+        provider = TelegramProvider(config)
+        with patch.object(provider.api, "call", AsyncMock()) as call:
+            assert await provider.send(episode)
+            assert call.call_args.args[1]["disable_notification"] is False
+            assert call.call_args.args[1]["message_thread_id"] == 42
+            poster[0].return_value = "https://example.test/a.png"
+            assert await provider.send(episode)
+            assert call.call_args.args[1]["has_spoiler"] is True
+
+    async def test_without_chat_tests_identity_without_running_actions(self):
+        provider = TelegramProvider(
+            ProviderConfig.model_validate(
+                {
+                    "type": "telegram",
+                    "token": "token",
+                    "telegram": {"event": {"method": "deleteWebhook"}},
+                }
+            )
+        )
+        with patch.object(provider.api, "call", AsyncMock()) as call:
+            success, _ = await provider.test()
+        assert success
+        call.assert_awaited_once_with("getMe")
 
 
 class TestDiscordProvider:
@@ -764,12 +822,11 @@ class TestDeliverText:
         )
         provider = TelegramProvider(config)
 
-        with patch.object(provider, "post_data", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = MagicMock(status_code=200)
+        with patch.object(provider.api, "call", AsyncMock()) as call:
             result = await provider._deliver_text("标题", "正文")
 
         assert result is True
-        data = mock_post.call_args[0][1]
+        data = call.call_args.args[1]
         assert data["text"] == "标题\n正文"
 
     async def test_webhook_deliver_text_posts_title_and_message(self):
