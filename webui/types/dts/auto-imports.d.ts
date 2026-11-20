@@ -13,6 +13,8 @@ declare global {
   const MARKET_STATES: typeof import('../../src/utils/plugin-market').MARKET_STATES
   const SCROLL_ANCHOR_OFFSET: typeof import('../../src/utils/scroll-spy').SCROLL_ANCHOR_OFFSET
   const SCROLL_BOTTOM_EPSILON: typeof import('../../src/utils/scroll-spy').SCROLL_BOTTOM_EPSILON
+  const TELEGRAM_PARSE_MODES: typeof import('../../src/utils/telegram-notification').TELEGRAM_PARSE_MODES
+  const TELEGRAM_RESERVED_PARAMETER_KEYS: typeof import('../../src/utils/telegram-notification').TELEGRAM_RESERVED_PARAMETER_KEYS
   const acceptHMRUpdate: typeof import('pinia').acceptHMRUpdate
   const apiAuth: typeof import('../../src/api/auth').apiAuth
   const apiBangumi: typeof import('../../src/api/bangumi').apiBangumi
@@ -32,17 +34,22 @@ declare global {
   const apiTokens: typeof import('../../src/api/access').apiTokens
   const apiUpdate: typeof import('../../src/api/update').apiUpdate
   const apiUsers: typeof import('../../src/api/access').apiUsers
+  const applyTelegramDraftToProvider: typeof import('../../src/utils/telegram-notification').applyTelegramDraftToProvider
   const axios: typeof import('../../src/utils/axios').axios
   const buildNexusPhpSearchUrl: typeof import('../../src/utils/nexusphp').buildNexusPhpSearchUrl
+  const buildTelegramSettings: typeof import('../../src/utils/telegram-notification').buildTelegramSettings
   const categoriesOf: typeof import('../../src/utils/plugin-market').categoriesOf
   const categoryCounts: typeof import('../../src/utils/plugin-market').categoryCounts
+  const cloneProviderConfig: typeof import('../../src/utils/telegram-notification').cloneProviderConfig
   const computed: typeof import('vue').computed
   const configSectionMatches: typeof import('../../src/utils/config-search').configSectionMatches
   const copyText: typeof import('../../src/utils/clipboard').copyText
   const countLogLevels: typeof import('../../src/utils/log-parse').countLogLevels
   const createApp: typeof import('vue').createApp
+  const createDefaultTelegramSettings: typeof import('../../src/utils/telegram-notification').createDefaultTelegramSettings
   const createPinia: typeof import('pinia').createPinia
   const createSharedComposable: typeof import('@vueuse/core').createSharedComposable
+  const createTelegramDraft: typeof import('../../src/utils/telegram-notification').createTelegramDraft
   const customRef: typeof import('vue').customRef
   const defineAsyncComponent: typeof import('vue').defineAsyncComponent
   const defineComponent: typeof import('vue').defineComponent
@@ -65,11 +72,13 @@ declare global {
   const idLabel: typeof import('../../src/utils/id-label').idLabel
   const inject: typeof import('vue').inject
   const isAtBottom: typeof import('../../src/utils/scroll-spy').isAtBottom
+  const isDefaultTelegramSettings: typeof import('../../src/utils/telegram-notification').isDefaultTelegramSettings
   const isProxy: typeof import('vue').isProxy
   const isReactive: typeof import('vue').isReactive
   const isReadonly: typeof import('vue').isReadonly
   const isRef: typeof import('vue').isRef
   const isShallow: typeof import('vue').isShallow
+  const isTelegramProvider: typeof import('../../src/utils/telegram-notification').isTelegramProvider
   const isValidNexusPhpCategoryIds: typeof import('../../src/utils/nexusphp').isValidNexusPhpCategoryIds
   const loadLocale: typeof import('../../src/hooks/useMyI18n').loadLocale
   const loadSavedLocale: typeof import('../../src/hooks/useMyI18n').loadSavedLocale
@@ -132,6 +141,8 @@ declare global {
   const toValue: typeof import('vue').toValue
   const tokensCss: typeof import('../../src/hooks/usePluginHostDeps').tokensCss
   const torrentKey: typeof import('../../src/store/downloader').torrentKey
+  const triStateFromBool: typeof import('../../src/utils/telegram-notification').triStateFromBool
+  const triStateToBool: typeof import('../../src/utils/telegram-notification').triStateToBool
   const triggerRef: typeof import('vue').triggerRef
   const unref: typeof import('vue').unref
   const useAccessStore: typeof import('../../src/store/access').useAccessStore
@@ -197,7 +208,7 @@ declare global {
   export type { LLMAuthKind, LLMProviderView, LLMAuthChallenge, LLMAuthStatus } from '../../src/api/llm'
   import('../../src/api/llm')
   // @ts-ignore
-  export type { TestProviderRequest, TestProviderConfigRequest, TestResponse, InboxSeverity, InboxMessage, InboxListResponse, InboxListParams } from '../../src/api/notification'
+  export type { TestProviderRequest, TestProviderConfigRequest, TestProviderConfigOptions, TestResponse, InboxSeverity, InboxMessage, InboxListResponse, InboxListParams } from '../../src/api/notification'
   import('../../src/api/notification')
   // @ts-ignore
   export type { SearchFilters, FilterOptions, GroupedBangumi } from '../../src/store/search'
@@ -232,4 +243,7 @@ declare global {
   // @ts-ignore
   export type { SectionTop } from '../../src/utils/scroll-spy'
   import('../../src/utils/scroll-spy')
+  // @ts-ignore
+  export type { TriStateValue, TelegramParseModeChoice, TelegramDraftForm, TelegramJsonSnapshot, TelegramJsonFieldSnapshots, TelegramDraftState, TelegramValidationError, TelegramDraftValidationErrors, TelegramBuildResult, ApplyTelegramDraftOptions } from '../../src/utils/telegram-notification'
+  import('../../src/utils/telegram-notification')
 }

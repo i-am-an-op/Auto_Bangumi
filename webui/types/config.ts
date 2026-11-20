@@ -79,32 +79,55 @@ export interface Network {
   tmdb_api_key: string;
   bgm_base_url: string;
 }
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
+export interface JsonObject {
+  [key: string]: JsonValue;
+}
+
+export type TelegramParseMode = 'HTML' | 'MarkdownV2' | 'Markdown';
+
+/** Telegram 发送选项（对应后端 TelegramSettings） */
+export interface TelegramSettings {
+  include_poster?: boolean;
+  message_thread_id?: number | null;
+  disable_notification?: boolean | null;
+  protect_content?: boolean | null;
+  parse_mode?: TelegramParseMode | null;
+  reply_markup?: JsonObject | null;
+  text_parameters?: JsonObject;
+  photo_parameters?: JsonObject;
+}
+
 /** Notification provider configuration */
 export interface NotificationProviderConfig {
   /** 内置渠道，或插件提供的渠道 id */
   type: TupleToUnion<NotificationType> | (string & {});
   enabled: boolean;
   // Common fields
-  token?: string;
-  chat_id?: string;
+  token?: string | null;
+  chat_id?: string | null;
   // Provider-specific fields
-  webhook_url?: string;
-  server_url?: string;
-  device_key?: string;
-  user_key?: string;
-  api_token?: string;
-  template?: string;
-  url?: string;
+  webhook_url?: string | null;
+  server_url?: string | null;
+  device_key?: string | null;
+  user_key?: string | null;
+  api_token?: string | null;
+  template?: string | null;
+  url?: string | null;
   // Bark 的可选推送参数
-  sound?: string;
-  group?: string;
-  level?: string;
-  icon?: string;
+  sound?: string | null;
+  group?: string | null;
+  level?: string | null;
+  icon?: string | null;
+  // Telegram 的可选发送参数
+  telegram?: TelegramSettings;
 }
 
 export interface Notification {
   enable: boolean;
   providers: NotificationProviderConfig[];
+  base_url?: string;
 }
 export interface LLM {
   enable: boolean;

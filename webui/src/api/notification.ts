@@ -1,4 +1,4 @@
-import type { NotificationType } from '#/config';
+import type { NotificationType, TelegramSettings } from '#/config';
 import type { TupleToUnion } from '#/utils';
 
 export interface TestProviderRequest {
@@ -6,21 +6,27 @@ export interface TestProviderRequest {
 }
 
 export interface TestProviderConfigRequest {
-  type: TupleToUnion<NotificationType>;
+  type: TupleToUnion<NotificationType> | (string & {});
   enabled?: boolean;
-  token?: string;
-  chat_id?: string;
-  webhook_url?: string;
-  server_url?: string;
-  device_key?: string;
-  user_key?: string;
-  api_token?: string;
-  template?: string;
-  url?: string;
-  sound?: string;
-  group?: string;
-  level?: string;
-  icon?: string;
+  token?: string | null;
+  chat_id?: string | null;
+  webhook_url?: string | null;
+  server_url?: string | null;
+  device_key?: string | null;
+  user_key?: string | null;
+  api_token?: string | null;
+  template?: string | null;
+  url?: string | null;
+  sound?: string | null;
+  group?: string | null;
+  level?: string | null;
+  icon?: string | null;
+  telegram?: TelegramSettings;
+}
+
+export interface TestProviderConfigOptions {
+  /** Original saved Telegram row index for restoring masked credentials. */
+  savedProviderIndex?: number;
 }
 
 export interface TestResponse {
@@ -70,13 +76,24 @@ export const apiNotification = {
   },
 
   /**
-   * Test an unsaved provider configuration
+   * Test an unsaved notification provider configuration
    */
-  async testProviderConfig(request: TestProviderConfigRequest) {
-    const { data } = await axios.post<TestResponse>(
-      'api/v1/notification/test-config',
-      request
-    );
+  async testProviderConfig(
+    request: TestProviderConfigRequest,
+    options?: TestProviderConfigOptions
+  ) {
+    const savedIndex = options?.savedProviderIndex;
+    const { data } =
+      savedIndex !== undefined
+        ? await axios.post<TestResponse>(
+            'api/v1/notification/test-config',
+            request,
+            { params: { saved_provider_index: savedIndex } }
+          )
+        : await axios.post<TestResponse>(
+            'api/v1/notification/test-config',
+            request
+          );
     return { data };
   },
 

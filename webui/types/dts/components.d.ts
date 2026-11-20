@@ -81,6 +81,7 @@ declare module 'vue' {
     ConfigProxy: typeof import('./../../src/components/setting/config-proxy.vue')['default']
     ConfigSearchProvider: typeof import('./../../src/components/setting/config-search-provider.vue')['default']
     ConfigSecurity: typeof import('./../../src/components/setting/config-security.vue')['default']
+    FieldTextarea: typeof import('./../../src/components/setting/field-textarea.vue')['default']
     LlmAuthDialog: typeof import('./../../src/components/setting/llm-auth-dialog.vue')['default']
     MarketConfirm: typeof import('./../../src/components/market/market-confirm.vue')['default']
     MediaQuery: typeof import('./../../src/components/media-query.vue')['default']

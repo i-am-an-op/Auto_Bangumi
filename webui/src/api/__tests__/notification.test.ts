@@ -41,11 +41,41 @@ describe('Notification API contract (path + HTTP method)', () => {
       type: 'telegram',
       token: 'abc',
       chat_id: '123',
+      telegram: {
+        include_poster: false,
+        message_thread_id: 42,
+        parse_mode: 'HTML',
+        disable_notification: false,
+        protect_content: true,
+        reply_markup: {
+          inline_keyboard: [[{ text: 'Open', url: 'https://example.org' }]],
+        },
+        text_parameters: { link_preview_options: { is_disabled: true } },
+        photo_parameters: { has_spoiler: true },
+      },
     };
     await apiNotification.testProviderConfig(request);
     expect(axios.post).toHaveBeenCalledWith(
       'api/v1/notification/test-config',
       request
+    );
+  });
+
+  it('should forward saved_provider_index query parameter when testing edits to a saved Telegram row', async () => {
+    (axios.post as any).mockResolvedValue({ data: mockTestResponse });
+    const request: TestProviderConfigRequest = {
+      type: 'telegram',
+      token: '********',
+      chat_id: '-100123',
+      telegram: { message_thread_id: 42 },
+    };
+    await apiNotification.testProviderConfig(request, {
+      savedProviderIndex: 0,
+    });
+    expect(axios.post).toHaveBeenCalledWith(
+      'api/v1/notification/test-config',
+      request,
+      { params: { saved_provider_index: 0 } }
     );
   });
 });
