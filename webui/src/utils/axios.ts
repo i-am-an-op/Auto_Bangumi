@@ -1,7 +1,17 @@
 import Axios from 'axios';
-import type { AxiosError, AxiosResponse } from 'axios';
+import type {
+  AxiosError,
+  AxiosRequestTransformer,
+  AxiosResponse,
+  AxiosResponseTransformer,
+} from 'axios';
 import { router } from '@/router';
 import type { ApiError, ApiErrorResponse, StatusCode } from '#/api';
+import {
+  hasRawJsonNumberToken,
+  parseJsonPreservingNumbers,
+  stringifyJsonPreservingNumbers,
+} from '@/utils/json-raw-numbers';
 
 declare module 'axios' {
   export interface AxiosRequestConfig {
@@ -13,8 +23,68 @@ declare module 'axios' {
   }
 }
 
+const rawDefaultRequestTransformers = Axios.defaults?.transformRequest;
+const defaultRequestTransformers: AxiosRequestTransformer[] = Array.isArray(
+  rawDefaultRequestTransformers
+)
+  ? rawDefaultRequestTransformers
+  : rawDefaultRequestTransformers
+    ? [rawDefaultRequestTransformers]
+    : [];
+
+const rawDefaultResponseTransformers = Axios.defaults?.transformResponse;
+const defaultResponseTransformers: AxiosResponseTransformer[] = Array.isArray(
+  rawDefaultResponseTransformers
+)
+  ? rawDefaultResponseTransformers
+  : rawDefaultResponseTransformers
+    ? [rawDefaultResponseTransformers]
+    : [];
+
+const preserveRawNumbersRequest: AxiosRequestTransformer = function (
+  data,
+  headers
+) {
+  const contentType = String(headers?.getContentType?.() || '');
+  const isNonJsonContentType =
+    contentType.includes('application/x-www-form-urlencoded') ||
+    contentType.includes('multipart/form-data');
+  if (!isNonJsonContentType && hasRawJsonNumberToken(data)) {
+    headers?.setContentType?.('application/json', false);
+    return stringifyJsonPreservingNumbers(data);
+  }
+  return defaultRequestTransformers.reduce(
+    (acc, fn) => fn.call(this, acc, headers),
+    data
+  );
+};
+
+const preserveRawNumbersResponse: AxiosResponseTransformer = function (
+  data,
+  headers,
+  status
+) {
+  if (
+    typeof data === 'string' &&
+    data.length > 0 &&
+    (!this.responseType || this.responseType === 'json')
+  ) {
+    try {
+      return parseJsonPreservingNumbers(data);
+    } catch {
+      // 非 JSON 文本响应（如 /api/v1/log）回退给 Axios 默认转换器原样返回
+    }
+  }
+  return defaultResponseTransformers.reduce(
+    (acc, fn) => fn.call(this, acc, headers, status),
+    data
+  );
+};
+
 export const axios = Axios.create({
   withCredentials: true,
+  transformRequest: [preserveRawNumbersRequest],
+  transformResponse: [preserveRawNumbersResponse],
 });
 
 // Throttle repeated identical error toasts (e.g. background polling during a

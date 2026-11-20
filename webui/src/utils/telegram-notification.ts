@@ -4,6 +4,12 @@ import type {
   TelegramParseMode,
   TelegramSettings,
 } from '#/config';
+import {
+  findUnrepresentableJsonNumber,
+  getRawJsonNumberText,
+  isRawJsonNumberToken,
+  stringifyJsonPreservingNumbers,
+} from '@/utils/json-raw-numbers';
 
 export const TELEGRAM_PARSE_MODES = ['HTML', 'MarkdownV2', 'Markdown'] as const;
 
@@ -116,7 +122,12 @@ export function triStateToBool(value: TriStateValue): boolean | null {
 }
 
 function isPlainJsonObject(value: unknown): value is JsonObject {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    !isRawJsonNumberToken(value)
+  );
 }
 
 function formatJsonObject(
@@ -125,7 +136,7 @@ function formatJsonObject(
 ): string {
   if (!isPlainJsonObject(value)) return '';
   if (omitEmpty && Object.keys(value).length === 0) return '';
-  return JSON.stringify(value, null, 2);
+  return stringifyJsonPreservingNumbers(value, 2) ?? '';
 }
 
 export function createTelegramDraft(
@@ -151,14 +162,16 @@ export function createTelegramDraft(
       ? settings.parse_mode
       : 'none';
 
+  const rawThreadId = settings?.message_thread_id;
+  const threadIdText =
+    rawThreadId !== null && rawThreadId !== undefined
+      ? (getRawJsonNumberText(rawThreadId) ?? String(rawThreadId))
+      : '';
+
   return {
     draft: {
       include_poster: settings?.include_poster ?? true,
-      message_thread_id:
-        settings?.message_thread_id !== null &&
-        settings?.message_thread_id !== undefined
-          ? String(settings.message_thread_id)
-          : '',
+      message_thread_id: threadIdText,
       parse_mode: parseMode,
       disable_notification: triStateFromBool(settings?.disable_notification),
       protect_content: triStateFromBool(settings?.protect_content),
@@ -183,89 +196,6 @@ export function createTelegramDraft(
       Object.keys(photoParameters).length > 0
     ),
   };
-}
-
-interface CanonicalDecimal {
-  negative: boolean;
-  coeff: string;
-  exp10: bigint;
-}
-
-function canonicalDecimal(raw: string): CanonicalDecimal | null {
-  const match = /^(-)?(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(raw);
-  if (!match) return null;
-  const negative = Boolean(match[1]);
-  const intPart = match[2];
-  const fracPart = match[3] ?? '';
-  const expPart = match[4] ? BigInt(match[4]) : 0n;
-
-  const combined = intPart + fracPart;
-  const strippedLeading = combined.replace(/^0+/, '');
-  if (strippedLeading === '') {
-    return { negative: false, coeff: '0', exp10: 0n };
-  }
-  const trimmedTrailing = strippedLeading.replace(/0+$/, '');
-  const trailingZeros = strippedLeading.length - trimmedTrailing.length;
-  const exp10 = expPart - BigInt(fracPart.length) + BigInt(trailingZeros);
-  return { negative, coeff: trimmedTrailing, exp10 };
-}
-
-function extractJsonNumberTokens(jsonText: string): string[] {
-  const tokens: string[] = [];
-  let i = 0;
-  const len = jsonText.length;
-  while (i < len) {
-    const ch = jsonText[i];
-    if (ch === '"') {
-      i += 1;
-      while (i < len) {
-        if (jsonText[i] === '\\') {
-          i += 2;
-        } else if (jsonText[i] === '"') {
-          i += 1;
-          break;
-        } else {
-          i += 1;
-        }
-      }
-      continue;
-    }
-    if (ch === '-' || (ch >= '0' && ch <= '9')) {
-      const start = i;
-      i += 1;
-      while (i < len && /[0-9eE.+-]/.test(jsonText[i])) {
-        i += 1;
-      }
-      tokens.push(jsonText.slice(start, i));
-      continue;
-    }
-    i += 1;
-  }
-  return tokens;
-}
-
-function findUnrepresentableJsonNumber(jsonText: string): string | null {
-  for (const raw of extractJsonNumberTokens(jsonText)) {
-    const num = Number(raw);
-    if (!Number.isFinite(num)) {
-      return raw;
-    }
-    if (/^-?\d+$/.test(raw) && !Number.isSafeInteger(num)) {
-      return raw;
-    }
-    const source = canonicalDecimal(raw);
-    const serialized = canonicalDecimal(String(num));
-    if (
-      !source ||
-      !serialized ||
-      source.negative !== serialized.negative ||
-      source.coeff !== serialized.coeff ||
-      source.exp10 !== serialized.exp10
-    ) {
-      return raw;
-    }
-  }
-  return null;
 }
 
 function findReservedKeys(obj: JsonObject): string[] {

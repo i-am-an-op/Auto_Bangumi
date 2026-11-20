@@ -59,24 +59,30 @@ declare global {
   const dirtyConfigGroups: typeof import('../../src/utils/config-diff').dirtyConfigGroups
   const effectScope: typeof import('vue').effectScope
   const entryState: typeof import('../../src/utils/plugin-market').entryState
+  const extractJsonNumberSpans: typeof import('../../src/utils/json-raw-numbers').extractJsonNumberSpans
   const fillSchemaDefaults: typeof import('../../src/utils/plugin-schema').fillSchemaDefaults
   const filterEntries: typeof import('../../src/utils/plugin-market').filterEntries
+  const findUnrepresentableJsonNumber: typeof import('../../src/utils/json-raw-numbers').findUnrepresentableJsonNumber
   const getActivePinia: typeof import('pinia').getActivePinia
   const getCurrentInstance: typeof import('vue').getCurrentInstance
   const getCurrentScope: typeof import('vue').getCurrentScope
   const getCurrentWatcher: typeof import('vue').getCurrentWatcher
+  const getRawJsonNumberText: typeof import('../../src/utils/json-raw-numbers').getRawJsonNumberText
   const h: typeof import('vue').h
   const hasConfiguredDownloader: typeof import('../../src/store/downloader').hasConfiguredDownloader
   const hasKey: typeof import('../../src/utils/id-label').hasKey
+  const hasRawJsonNumberToken: typeof import('../../src/utils/json-raw-numbers').hasRawJsonNumberToken
   const i18n: typeof import('../../src/hooks/useMyI18n').i18n
   const idLabel: typeof import('../../src/utils/id-label').idLabel
   const inject: typeof import('vue').inject
   const isAtBottom: typeof import('../../src/utils/scroll-spy').isAtBottom
   const isDefaultTelegramSettings: typeof import('../../src/utils/telegram-notification').isDefaultTelegramSettings
   const isProxy: typeof import('vue').isProxy
+  const isRawJsonNumberToken: typeof import('../../src/utils/json-raw-numbers').isRawJsonNumberToken
   const isReactive: typeof import('vue').isReactive
   const isReadonly: typeof import('vue').isReadonly
   const isRef: typeof import('vue').isRef
+  const isRepresentableJsonNumber: typeof import('../../src/utils/json-raw-numbers').isRepresentableJsonNumber
   const isShallow: typeof import('vue').isShallow
   const isTelegramProvider: typeof import('../../src/utils/telegram-notification').isTelegramProvider
   const isValidNexusPhpCategoryIds: typeof import('../../src/utils/nexusphp').isValidNexusPhpCategoryIds
@@ -107,6 +113,7 @@ declare global {
   const onUnmounted: typeof import('vue').onUnmounted
   const onUpdated: typeof import('vue').onUpdated
   const onWatcherCleanup: typeof import('vue').onWatcherCleanup
+  const parseJsonPreservingNumbers: typeof import('../../src/utils/json-raw-numbers').parseJsonPreservingNumbers
   const parseLogLines: typeof import('../../src/utils/log-parse').parseLogLines
   const permissionDiff: typeof import('../../src/utils/plugin-market').permissionDiff
   const pickActiveSection: typeof import('../../src/utils/scroll-spy').pickActiveSection
@@ -135,6 +142,7 @@ declare global {
   const slotTitle: typeof import('../../src/hooks/usePluginUi').slotTitle
   const sourceUrl: typeof import('../../src/utils/plugin-market').sourceUrl
   const storeToRefs: typeof import('pinia').storeToRefs
+  const stringifyJsonPreservingNumbers: typeof import('../../src/utils/json-raw-numbers').stringifyJsonPreservingNumbers
   const toRaw: typeof import('vue').toRaw
   const toRef: typeof import('vue').toRef
   const toRefs: typeof import('vue').toRefs
@@ -228,6 +236,9 @@ declare global {
   // @ts-ignore
   export type { AxiosRequestConfig } from '../../src/utils/axios'
   import('../../src/utils/axios')
+  // @ts-ignore
+  export type { JsonNumberSpan } from '../../src/utils/json-raw-numbers'
+  import('../../src/utils/json-raw-numbers')
   // @ts-ignore
   export type { LogLevel, LogEntry, LogLevelCounts } from '../../src/utils/log-parse'
   import('../../src/utils/log-parse')

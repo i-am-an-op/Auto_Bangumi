@@ -4,6 +4,10 @@ import ConfigNotification from '../config-notification.vue';
 import AbField from '@/components/basic/ab-field.vue';
 import type { NotificationProviderConfig } from '#/config';
 import { apiNotification } from '@/api/notification';
+import {
+  parseJsonPreservingNumbers,
+  stringifyJsonPreservingNumbers,
+} from '@/utils/json-raw-numbers';
 
 vi.mock('@/api/notification', () => ({
   apiNotification: { testProviderConfig: vi.fn(), testProvider: vi.fn() },
@@ -1053,6 +1057,69 @@ describe('config-notification', () => {
         telegram: expect.objectContaining({ message_thread_id: 88 }),
       }),
       { savedProviderIndex: 1 }
+    );
+  });
+
+  it('should preserve a large integer already stored on bot A when editing bot B or unrelated fields on bot A', async () => {
+    const loadedProviders = parseJsonPreservingNumbers(
+      '[{"type":"telegram","enabled":true,"token":"********","chat_id":"-100A","telegram":{"include_poster":true,"message_thread_id":42,"disable_notification":null,"protect_content":null,"parse_mode":null,"reply_markup":null,"text_parameters":{"future_number":9007199254740993},"photo_parameters":{}}},{"type":"telegram","enabled":true,"token":"********","chat_id":"-100B","telegram":{"include_poster":true,"message_thread_id":73,"disable_notification":null,"protect_content":null,"parse_mode":null,"reply_markup":null,"text_parameters":{},"photo_parameters":{}}}]'
+    ) as NotificationProviderConfig[];
+    seedSavedProviders(loadedProviders);
+
+    const w = mountPage();
+    // Edit only bot B's topic (73 -> 88) and apply
+    await w
+      .findAll('[aria-label="config.notification_set.edit"]')[1]
+      .trigger('click');
+    await flushPromises();
+    await w.find('[data-field="telegram-thread-id"]').setValue('88');
+    await w
+      .findAll('button')
+      .find((b) => b.text() === 'config.apply')!
+      .trigger('click');
+    await flushPromises();
+
+    // Bot A's stored large integer stays intact for serialization
+    const serializedAfterBotBEdit = stringifyJsonPreservingNumbers(
+      group.value.providers
+    )!;
+    expect(serializedAfterBotBEdit).toContain(
+      '"future_number":9007199254740993'
+    );
+    expect(serializedAfterBotBEdit).not.toContain('9007199254740992');
+
+    // Opening bot A shows the exact 9007199254740993 and preserves it across an unrelated topic edit + test + apply
+    await w
+      .findAll('[aria-label="config.notification_set.edit"]')[0]
+      .trigger('click');
+    await flushPromises();
+    expect(
+      (
+        w.find('[data-field="telegram-text-parameters"]')
+          .element as HTMLTextAreaElement
+      ).value
+    ).toContain('"future_number": 9007199254740993');
+
+    await w.find('[data-field="telegram-thread-id"]').setValue('55');
+    await w
+      .findAll('button')
+      .find((b) => b.text() === 'config.notification_set.test')!
+      .trigger('click');
+    await flushPromises();
+
+    const testedPayload = api.testProviderConfig.mock.calls[0]?.[0];
+    expect(stringifyJsonPreservingNumbers(testedPayload)).toContain(
+      '"future_number":9007199254740993'
+    );
+
+    await w
+      .findAll('button')
+      .find((b) => b.text() === 'config.apply')!
+      .trigger('click');
+    await flushPromises();
+
+    expect(stringifyJsonPreservingNumbers(group.value.providers[0])).toContain(
+      '"future_number":9007199254740993'
     );
   });
 });
